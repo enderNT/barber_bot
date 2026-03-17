@@ -10,6 +10,7 @@ from app.observability.flow_logger import mark_error, step, substep
 from app.services.clinic_config import ClinicConfigLoader
 from app.services.llm import ClinicLLMService
 from app.services.memory import MemoryStore
+from app.services.qdrant import QdrantRetrievalService
 
 logger = logging.getLogger(__name__)
 
@@ -22,6 +23,7 @@ class GraphState(TypedDict, total=False):
     user_message: str
     clinic_context: str
     memories: list[str]
+    rag_context: str
     intent: str
     routing_reason: str
     routing_confidence: float
@@ -36,10 +38,12 @@ class ClinicWorkflow:
         llm_service: ClinicLLMService,
         memory_store: MemoryStore,
         clinic_config_loader: ClinicConfigLoader,
+        qdrant_service: QdrantRetrievalService,
     ) -> None:
         self._llm_service = llm_service
         self._memory_store = memory_store
         self._clinic_config_loader = clinic_config_loader
+        self._qdrant_service = qdrant_service
         self._graph = self._build_graph()
 
     def _build_graph(self):
@@ -84,6 +88,13 @@ class ClinicWorkflow:
                 limit=5,
             )
             substep("mem0_lookup", "OK", f"memories={len(memories)}")
+            rag_context = await self._qdrant_service.build_context(
+                query=webhook.latest_message or "contexto del usuario",
+                contact_id=webhook.contact_id,
+                clinic_context=clinic_context,
+                memories=memories,
+            )
+            substep("qdrant_lookup", "OK", "contexto vectorial simulado/preparado")
             step("2.1 build_context", "OK")
             return {
                 "conversation_id": webhook.conversation_id,
@@ -92,6 +103,7 @@ class ClinicWorkflow:
                 "user_message": webhook.latest_message,
                 "clinic_context": clinic_context,
                 "memories": memories,
+                "rag_context": rag_context,
             }
         except Exception as exc:
             mark_error("2.1 build_context", exc)
@@ -153,11 +165,11 @@ class ClinicWorkflow:
 
     async def _rag(self, state: GraphState) -> GraphState:
         try:
-            step("3.b.1 rag_node", "RUN", "RAG sin indice vectorial; fallback controlado")
+            step("3.b.1 rag_node", "RUN", "preparando contexto qdrant simulado")
             response_text = await self._llm_service.build_rag_reply(
                 user_message=state["user_message"],
                 memories=state.get("memories", []),
-                clinic_context=state["clinic_context"],
+                clinic_context=state.get("rag_context", state["clinic_context"]),
             )
             step("3.b.1 rag_node", "OK", f"chars={len(response_text)}")
             return {

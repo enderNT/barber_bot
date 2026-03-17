@@ -27,6 +27,15 @@ class Settings(BaseSettings):
     mem0_org_id: str | None = None
     mem0_project_id: str | None = None
 
+    qdrant_enabled: bool = False
+    qdrant_simulate: bool = True
+    qdrant_base_url: str | None = None
+    qdrant_api_key: str | None = None
+    qdrant_collection_name: str = "clinic_knowledge"
+    qdrant_timeout_seconds: int = 10
+    qdrant_top_k: int = 5
+    qdrant_vector_size: int = 8
+
     chatwoot_reply_enabled: bool = False
     chatwoot_api_base_url: str | None = None
     chatwoot_api_token: str | None = None
