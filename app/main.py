@@ -16,7 +16,11 @@ from app.webhooks.routes import build_webhook_router
 
 def create_app() -> FastAPI:
     settings = get_settings()
-    logging.basicConfig(level=getattr(logging, settings.log_level.upper(), logging.INFO))
+    logging.basicConfig(
+        level=getattr(logging, settings.log_level.upper(), logging.INFO),
+        format="%(asctime)s | %(levelname)-5s | %(name)s | %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+    )
 
     clinic_config_loader = ClinicConfigLoader(settings.clinic_config_path)
     llm_service = ClinicLLMService(VLLMClient(settings))

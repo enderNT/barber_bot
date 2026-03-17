@@ -16,7 +16,7 @@ class AppointmentIntentPayload(BaseModel):
 
 
 class IntentDecision(BaseModel):
-    intent: Literal["conversation", "appointment_intent"] = "conversation"
+    intent: Literal["conversation", "rag", "appointment_intent"] = "conversation"
     confidence: float = 0.0
     reason: str = ""
 

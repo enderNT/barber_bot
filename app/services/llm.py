@@ -8,6 +8,7 @@ from typing import Any
 import httpx
 
 from app.models.schemas import AppointmentIntentPayload, IntentDecision
+from app.observability.flow_logger import mark_error, step, substep
 from app.settings import Settings
 
 logger = logging.getLogger(__name__)
@@ -30,11 +31,18 @@ class VLLMClient:
         headers = {"Content-Type": "application/json"}
         if self._api_key:
             headers["Authorization"] = f"Bearer {self._api_key}"
-        async with httpx.AsyncClient(timeout=self._timeout) as client:
-            response = await client.post(f"{self._base_url}/chat/completions", json=payload, headers=headers)
-            response.raise_for_status()
-        data = response.json()
-        return data["choices"][0]["message"]["content"].strip()
+        step("2.2.1 vllm_call", "RUN", f"model={self._model}")
+        try:
+            async with httpx.AsyncClient(timeout=self._timeout) as client:
+                response = await client.post(f"{self._base_url}/chat/completions", json=payload, headers=headers)
+                response.raise_for_status()
+            data = response.json()
+            content = data["choices"][0]["message"]["content"].strip()
+            step("2.2.1 vllm_call", "OK", f"response_chars={len(content)}")
+            return content
+        except Exception as exc:
+            mark_error("2.2.1 vllm_call", exc)
+            raise
 
     async def chat_text(self, system_prompt: str, user_prompt: str) -> str:
         return await self._chat(
@@ -57,7 +65,8 @@ class ClinicLLMService:
         system_prompt = (
             "Clasifica el mensaje del usuario. "
             "Devuelve JSON estricto con las llaves intent, confidence y reason. "
-            "intent debe ser 'conversation' o 'appointment_intent'."
+            "intent debe ser 'conversation', 'rag' o 'appointment_intent'. "
+            "Usa 'rag' cuando la pregunta requiera buscar detalles concretos de conocimiento institucional."
         )
         user_prompt = (
             f"Mensaje: {user_message}\n"
@@ -66,10 +75,13 @@ class ClinicLLMService:
             "Si el usuario quiere agendar, reservar o pedir una cita, clasifica como appointment_intent."
         )
         try:
+            substep("router_prompt_compose", "OK", f"msg_chars={len(user_message)} memories={len(memories)}")
             payload = await self._client.chat_json(system_prompt, user_prompt)
+            substep("router_json_parse", "OK")
             return IntentDecision.model_validate(payload)
         except Exception as exc:
             logger.warning("LLM routing failed, using heuristic fallback: %s", exc)
+            substep("router_fallback", "WARN", "heuristic intent detection")
             return self._fallback_route(user_message)
 
     async def build_conversation_reply(self, user_message: str, memories: list[str], clinic_context: str) -> str:
@@ -85,12 +97,36 @@ class ClinicLLMService:
             "Responde en espanol de forma breve, clara y operativa."
         )
         try:
+            substep("conversation_prompt_compose", "OK", f"msg_chars={len(user_message)} memories={len(memories)}")
             return await self._client.chat_text(system_prompt, user_prompt)
         except Exception as exc:
             logger.warning("LLM conversation failed, using deterministic fallback: %s", exc)
+            substep("conversation_fallback", "WARN", "mensaje deterministico")
             return (
                 "Puedo ayudarte con informacion general de la clinica y con solicitudes de cita. "
                 "Si tu pregunta depende de un dato no disponible, la canalizo con recepcion."
+            )
+
+    async def build_rag_reply(self, user_message: str, memories: list[str], clinic_context: str) -> str:
+        system_prompt = (
+            "Eres un asistente clinico en modo RAG. Usa solo el contexto entregado y no inventes informacion. "
+            "Si falta informacion, dilo claramente y escala con recepcion."
+        )
+        user_prompt = (
+            f"Contexto recuperado:\n{clinic_context}\n"
+            f"Memoria conversacional: {memories}\n"
+            f"Pregunta: {user_message}\n"
+            "Responde breve y accionable en espanol."
+        )
+        try:
+            substep("rag_prompt_compose", "OK", f"msg_chars={len(user_message)} memories={len(memories)}")
+            return await self._client.chat_text(system_prompt, user_prompt)
+        except Exception as exc:
+            logger.warning("LLM rag failed, using deterministic fallback: %s", exc)
+            substep("rag_fallback", "WARN", "RAG degradado a respuesta segura")
+            return (
+                "Puedo responder con la informacion disponible de la clinica. "
+                "Si necesitas un dato que no aparece en el contexto actual, lo canalizo con recepcion."
             )
 
     async def extract_appointment_intent(
@@ -108,15 +144,21 @@ class ClinicLLMService:
             "Si faltan datos, listalos en missing_fields."
         )
         try:
+            substep("appointment_prompt_compose", "OK", f"msg_chars={len(user_message)} memories={len(memories)}")
             payload = await self._client.chat_json(system_prompt, user_prompt)
             appointment = AppointmentIntentPayload.model_validate(payload)
+            substep("appointment_json_parse", "OK")
         except Exception as exc:
             logger.warning("LLM appointment extraction failed, using heuristic fallback: %s", exc)
+            substep("appointment_fallback", "WARN", "extraccion heuristica")
             appointment = self._fallback_appointment(user_message, contact_name)
         reply = self._build_appointment_reply(appointment)
         return appointment, reply
 
     def _fallback_route(self, user_message: str) -> IntentDecision:
+        rag_keywords = ("precio", "costo", "horario", "horarios", "doctor", "especialidad", "servicio")
+        if any(word in user_message.lower() for word in rag_keywords):
+            return IntentDecision(intent="rag", confidence=0.60, reason="heuristic-rag-fallback")
         keywords = ("cita", "agendar", "agendo", "reservar", "consulta", "doctor", "doctora")
         intent = "appointment_intent" if any(word in user_message.lower() for word in keywords) else "conversation"
         confidence = 0.72 if intent == "appointment_intent" else 0.55
