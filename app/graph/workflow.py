@@ -10,6 +10,7 @@ from app.observability.flow_logger import mark_error, step, substep
 from app.services.clinic_config import ClinicConfigLoader
 from app.services.llm import ClinicLLMService
 from app.services.memory import MemoryStore
+from app.services.router import ClinicIntentRouterService
 from app.services.qdrant import QdrantRetrievalService
 
 logger = logging.getLogger(__name__)
@@ -35,11 +36,13 @@ class GraphState(TypedDict, total=False):
 class ClinicWorkflow:
     def __init__(
         self,
+        router_service: ClinicIntentRouterService,
         llm_service: ClinicLLMService,
         memory_store: MemoryStore,
         clinic_config_loader: ClinicConfigLoader,
         qdrant_service: QdrantRetrievalService,
     ) -> None:
+        self._router_service = router_service
         self._llm_service = llm_service
         self._memory_store = memory_store
         self._clinic_config_loader = clinic_config_loader
@@ -111,14 +114,14 @@ class ClinicWorkflow:
 
     async def _route(self, state: GraphState) -> GraphState:
         try:
-            step("2.2 semantic_router_vllm", "RUN", "clasificando intent")
-            decision = await self._llm_service.route_intent(
+            step("2.2 intent_router_openai", "RUN", "clasificando intent")
+            decision = await self._router_service.route_intent(
                 user_message=state["user_message"],
                 memories=state.get("memories", []),
                 clinic_context=state["clinic_context"],
             )
             step(
-                "2.2 semantic_router_vllm",
+                "2.2 intent_router_openai",
                 "OK",
                 f"intent={decision.intent} confidence={decision.confidence:.2f} reason={decision.reason}",
             )
@@ -128,7 +131,7 @@ class ClinicWorkflow:
                 "routing_confidence": decision.confidence,
             }
         except Exception as exc:
-            mark_error("2.2 semantic_router_vllm", exc)
+            mark_error("2.2 intent_router_openai", exc)
             raise
 
     def _branch_after_route(self, state: GraphState) -> str:

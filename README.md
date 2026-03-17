@@ -1,12 +1,13 @@
 # Clinica Assistant
 
-Backend en Python para una clinica que recibe mensajes por webhook de Chatwoot, enruta semanticamente con `vLLM`, orquesta con `LangGraph`, mantiene continuidad conversacional con `mem0` y prepara recuperacion RAG con `Qdrant`.
+Backend en Python para una clinica que recibe mensajes por webhook de Chatwoot, usa `OpenAI` para generacion y `semantic-router` para enrutamiento semantico, orquesta con `LangGraph`, mantiene continuidad conversacional con `mem0` y prepara recuperacion RAG con `Qdrant`.
 
 ## Componentes
 
 - `FastAPI` para el webhook `POST`.
 - `LangGraph` para el flujo conversacional.
-- `vLLM` como backend de inferencia OpenAI-compatible.
+- `OpenAI` como proveedor remoto de generacion.
+- `semantic-router` de Aurelio Labs para el enrutamiento semantico.
 - `mem0` para memoria de usuario/conversacion.
 - `Qdrant` como vector store para el nodo RAG, con modo de simulacion habilitado por defecto.
 - Configuracion local estatica para servicios, horarios, doctores y politicas.
@@ -34,13 +35,11 @@ cp .env.example .env
 
 4. Ajustar `config/clinic.json` con los datos reales de la clinica.
 
-5. Levantar `vLLM` localmente. Ejemplo:
+5. Exportar credenciales de OpenAI en tu entorno:
 
 ```bash
-python -m vllm.entrypoints.openai.api_server \
-  --host 0.0.0.0 \
-  --port 8001 \
-  --model meta-llama/Llama-3.1-8B-Instruct
+export OPENAI_API_KEY="..."
+export OPENAI_MODEL="gpt-5-mini"
 ```
 
 6. Ejecutar la API:
@@ -56,7 +55,7 @@ uvicorn app.main:create_app --factory --reload
 1. Chatwoot envia un `POST` al webhook.
 2. La API responde inmediatamente con un acuse.
 3. En segundo plano se arma el contexto con mensaje, memoria, config clinica y contexto vectorial Qdrant simulado o real.
-4. LangGraph decide entre conversacion general o intencion de cita.
+4. LangGraph decide entre conversacion general, RAG o intencion de cita usando `semantic-router` con embeddings de OpenAI.
 5. La respuesta se envia por la API de Chatwoot si esta habilitada; si no, queda registrada en logs.
 
 ## Git

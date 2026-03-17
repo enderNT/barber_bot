@@ -5,13 +5,15 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "clinica-assistant"
 version = "0.1.0"
-description = "Webhook clínico para Chatwoot con LangGraph, vLLM y memoria."
+description = "Webhook clínico para Chatwoot con LangGraph, OpenAI y memoria."
 requires-python = ">=3.11"
 dependencies = [
   "fastapi>=0.115.0,<1.0.0",
   "httpx>=0.28.0,<1.0.0",
   "langgraph>=0.3.0,<0.4.0",
   "mem0ai>=0.1.82",
+  "openai>=1.60.0,<2.0.0",
+  "semantic-router>=0.1.5,<1.0.0",
   "pydantic>=2.10.0,<3.0.0",
   "pydantic-settings>=2.7.0,<3.0.0",
   "uvicorn[standard]>=0.34.0,<1.0.0",

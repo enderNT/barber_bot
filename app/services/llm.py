@@ -5,84 +5,60 @@ import logging
 import re
 from typing import Any
 
-import httpx
+from openai import AsyncOpenAI
 
-from app.models.schemas import AppointmentIntentPayload, IntentDecision
+from app.models.schemas import AppointmentIntentPayload
 from app.observability.flow_logger import mark_error, step, substep
 from app.settings import Settings
 
 logger = logging.getLogger(__name__)
 
 
-class VLLMClient:
+class OpenAIClient:
     def __init__(self, settings: Settings) -> None:
-        self._base_url = settings.vllm_base_url.rstrip("/")
-        self._model = settings.vllm_model
-        self._api_key = settings.vllm_api_key
-        self._timeout = settings.llm_timeout_seconds
-        self._temperature = settings.llm_temperature
+        client_kwargs: dict[str, Any] = {"timeout": settings.openai_timeout_seconds}
+        client_kwargs["api_key"] = settings.openai_api_key or "sk-placeholder"
+        if settings.openai_base_url:
+            client_kwargs["base_url"] = settings.openai_base_url.rstrip("/")
+        self._client = AsyncOpenAI(**client_kwargs)
+        self._model = settings.openai_model
+        self._temperature = settings.openai_temperature
 
-    async def _chat(self, messages: list[dict[str, str]], temperature: float | None = None) -> str:
-        payload = {
-            "model": self._model,
-            "messages": messages,
-            "temperature": self._temperature if temperature is None else temperature,
-        }
-        headers = {"Content-Type": "application/json"}
-        if self._api_key:
-            headers["Authorization"] = f"Bearer {self._api_key}"
-        step("2.2.1 vllm_call", "RUN", f"model={self._model}")
+    async def chat_text(self, messages: list[dict[str, str]], temperature: float | None = None) -> str:
+        step("2.2.1 openai_chat_completion", "RUN", f"model={self._model}")
         try:
-            async with httpx.AsyncClient(timeout=self._timeout) as client:
-                response = await client.post(f"{self._base_url}/chat/completions", json=payload, headers=headers)
-                response.raise_for_status()
-            data = response.json()
-            content = data["choices"][0]["message"]["content"].strip()
-            step("2.2.1 vllm_call", "OK", f"response_chars={len(content)}")
+            response = await self._client.chat.completions.create(
+                model=self._model,
+                messages=messages,
+                temperature=self._temperature if temperature is None else temperature,
+            )
+            content = (response.choices[0].message.content or "").strip()
+            step("2.2.1 openai_chat_completion", "OK", f"response_chars={len(content)}")
             return content
         except Exception as exc:
-            mark_error("2.2.1 vllm_call", exc)
+            mark_error("2.2.1 openai_chat_completion", exc)
             raise
 
-    async def chat_text(self, system_prompt: str, user_prompt: str) -> str:
-        return await self._chat(
-            [
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt},
-            ]
-        )
-
-    async def chat_json(self, system_prompt: str, user_prompt: str) -> dict[str, Any]:
-        content = await self.chat_text(system_prompt, user_prompt)
-        return _extract_json(content)
+    async def chat_json(self, messages: list[dict[str, str]], temperature: float | None = None) -> dict[str, Any]:
+        step("2.2.1 openai_chat_completion", "RUN", f"model={self._model} json_mode=True")
+        try:
+            response = await self._client.chat.completions.create(
+                model=self._model,
+                messages=messages,
+                temperature=self._temperature if temperature is None else temperature,
+                response_format={"type": "json_object"},
+            )
+            content = (response.choices[0].message.content or "").strip()
+            step("2.2.1 openai_chat_completion", "OK", f"response_chars={len(content)}")
+            return _extract_json(content)
+        except Exception as exc:
+            mark_error("2.2.1 openai_chat_completion", exc)
+            raise
 
 
 class ClinicLLMService:
-    def __init__(self, client: VLLMClient) -> None:
+    def __init__(self, client: OpenAIClient) -> None:
         self._client = client
-
-    async def route_intent(self, user_message: str, memories: list[str], clinic_context: str) -> IntentDecision:
-        system_prompt = (
-            "Clasifica el mensaje del usuario. "
-            "Devuelve JSON estricto con las llaves intent, confidence y reason. "
-            "intent debe ser 'conversation', 'rag' o 'appointment_intent'. "
-            "Usa 'rag' cuando la pregunta requiera buscar detalles concretos de conocimiento institucional."
-        )
-        user_prompt = (
-            f"Mensaje: {user_message}\n"
-            f"Memorias: {memories}\n"
-            f"Contexto clinico:\n{clinic_context}\n"
-            "Si el usuario quiere agendar, reservar o pedir una cita, clasifica como appointment_intent."
-        )
-        try:
-            substep("router_prompt_compose", "OK", f"msg_chars={len(user_message)} memories={len(memories)}")
-            payload = await self._client.chat_json(system_prompt, user_prompt)
-            substep("router_json_parse", "OK")
-            return IntentDecision.model_validate(payload)
-        except Exception as exc:
-            logger.warning("LLM routing failed, using heuristic fallback: %s", exc)
-            substep("router_fallback", "WARN", "heuristic intent detection")
-            return self._fallback_route(user_message)
 
     async def build_conversation_reply(self, user_message: str, memories: list[str], clinic_context: str) -> str:
         system_prompt = (
@@ -98,9 +74,14 @@ class ClinicLLMService:
         )
         try:
             substep("conversation_prompt_compose", "OK", f"msg_chars={len(user_message)} memories={len(memories)}")
-            return await self._client.chat_text(system_prompt, user_prompt)
+            return await self._client.chat_text(
+                [
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt},
+                ]
+            )
         except Exception as exc:
-            logger.warning("LLM conversation failed, using deterministic fallback: %s", exc)
+            logger.warning("OpenAI conversation failed, using deterministic fallback: %s", exc)
             substep("conversation_fallback", "WARN", "mensaje deterministico")
             return (
                 "Puedo ayudarte con informacion general de la clinica y con solicitudes de cita. "
@@ -120,9 +101,14 @@ class ClinicLLMService:
         )
         try:
             substep("rag_prompt_compose", "OK", f"msg_chars={len(user_message)} memories={len(memories)}")
-            return await self._client.chat_text(system_prompt, user_prompt)
+            return await self._client.chat_text(
+                [
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt},
+                ]
+            )
         except Exception as exc:
-            logger.warning("LLM rag failed, using deterministic fallback: %s", exc)
+            logger.warning("OpenAI rag failed, using deterministic fallback: %s", exc)
             substep("rag_fallback", "WARN", "RAG degradado a respuesta segura")
             return (
                 "Puedo responder con la informacion disponible de la clinica. "
@@ -145,24 +131,20 @@ class ClinicLLMService:
         )
         try:
             substep("appointment_prompt_compose", "OK", f"msg_chars={len(user_message)} memories={len(memories)}")
-            payload = await self._client.chat_json(system_prompt, user_prompt)
+            payload = await self._client.chat_json(
+                [
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt},
+                ]
+            )
             appointment = AppointmentIntentPayload.model_validate(payload)
             substep("appointment_json_parse", "OK")
         except Exception as exc:
-            logger.warning("LLM appointment extraction failed, using heuristic fallback: %s", exc)
+            logger.warning("OpenAI appointment extraction failed, using heuristic fallback: %s", exc)
             substep("appointment_fallback", "WARN", "extraccion heuristica")
             appointment = self._fallback_appointment(user_message, contact_name)
         reply = self._build_appointment_reply(appointment)
         return appointment, reply
-
-    def _fallback_route(self, user_message: str) -> IntentDecision:
-        rag_keywords = ("precio", "costo", "horario", "horarios", "doctor", "especialidad", "servicio")
-        if any(word in user_message.lower() for word in rag_keywords):
-            return IntentDecision(intent="rag", confidence=0.60, reason="heuristic-rag-fallback")
-        keywords = ("cita", "agendar", "agendo", "reservar", "consulta", "doctor", "doctora")
-        intent = "appointment_intent" if any(word in user_message.lower() for word in keywords) else "conversation"
-        confidence = 0.72 if intent == "appointment_intent" else 0.55
-        return IntentDecision(intent=intent, confidence=confidence, reason="heuristic-fallback")
 
     def _fallback_appointment(self, user_message: str, contact_name: str) -> AppointmentIntentPayload:
         lowered = user_message.lower()

@@ -14,11 +14,12 @@ class Settings(BaseSettings):
     app_port: int = 8000
     log_level: str = "INFO"
 
-    vllm_base_url: str = "http://127.0.0.1:8001/v1"
-    vllm_model: str = "meta-llama/Llama-3.1-8B-Instruct"
-    vllm_api_key: str = "EMPTY"
-    llm_timeout_seconds: int = 30
-    llm_temperature: float = 0.1
+    openai_api_key: str | None = None
+    openai_base_url: str | None = None
+    openai_model: str = "gpt-5-mini"
+    openai_embedding_model: str = "text-embedding-3-small"
+    openai_timeout_seconds: int = 30
+    openai_temperature: float = 0.1
 
     clinic_config_path: Path = Field(default=Path("config/clinic.json"))
 
