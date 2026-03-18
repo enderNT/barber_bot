@@ -1,213 +1,203 @@
 from __future__ import annotations
 
 import logging
+import re
 from typing import Any
 
-from app.models.schemas import IntentDecision
+from app.models.schemas import RoutingPacket, StateRoutingDecision
 from app.observability.flow_logger import substep
-from app.observability.router_input_logger import log_router_input
+from app.services.llm import ClinicLLMService
 from app.settings import Settings
 
 logger = logging.getLogger(__name__)
 
-try:  # pragma: no cover - optional dependency during local development
-    from semantic_router import Route
-    from semantic_router.encoders import OpenAIEncoder
-    from semantic_router.index import LocalIndex
-    from semantic_router.routers import SemanticRouter
 
-    SEMANTIC_ROUTER_AVAILABLE = True
-except Exception:  # pragma: no cover - import guard for environments without the package
-    Route = Any  # type: ignore[assignment]
-    OpenAIEncoder = Any  # type: ignore[assignment]
-    LocalIndex = Any  # type: ignore[assignment]
-    SemanticRouter = Any  # type: ignore[assignment]
-    SEMANTIC_ROUTER_AVAILABLE = False
-ROUTE_DEFINITIONS = [
-    {
-        "name": "conversation",
-        "utterances": [
-            "hola",
-            "buenos dias",
-            "gracias",
-            "perfecto",
-            "ok",
-            "me puedes ayudar",
-            "solo queria saludar",
-            "tengo una duda corta",
-            "muchas gracias",
-            "entendido",
-            "de acuerdo",
-            "hola buenos dias",
-        ],
-        "score_threshold": 0.42,
-    },
-    {
-        "name": "rag",
-        "utterances": [
-            "cuales son sus horarios",
-            "que servicios ofrecen",
-            "cuanto cuesta la consulta",
-            "que doctores tienen",
-            "atienden sabados",
-            "donde estan ubicados",
-            "que especialidades manejan",
-            "politicas de pago",
-            "cuanto cuesta",
-            "que precio tiene la consulta",
-            "que doctores atienden",
-            "a que hora abren",
-        ],
-        "score_threshold": 0.46,
-    },
-    {
-        "name": "appointment_intent",
-        "utterances": [
-            "quiero agendar una cita",
-            "necesito una consulta",
-            "quiero reservar con un doctor",
-            "me ayudas a sacar una cita",
-            "busco cita para dermatologia",
-            "quiero programar una visita",
-            "tengo que agendar una cita para manana",
-            "quiero una cita el viernes",
-            "me gustaria una cita",
-            "quiero reservar una consulta",
-            "puedo agendar para hoy",
-            "necesito cita con pediatria",
-        ],
-        "score_threshold": 0.48,
-    },
-]
-
-
-class ClinicIntentRouterService:
-    def __init__(self, settings: Settings) -> None:
+class StateRoutingService:
+    def __init__(self, settings: Settings, llm_service: ClinicLLMService) -> None:
         self._settings = settings
-        self._debug = settings.semantic_router_debug
-        self._router = self._build_router()
+        self._llm_service = llm_service
 
-    def _build_router(self):
-        if not SEMANTIC_ROUTER_AVAILABLE or not self._settings.openai_api_key:
-            logger.warning(
-                "semantic-router unavailable or OPENAI_API_KEY missing; using deterministic fallback router"
+    async def route_state(
+        self,
+        *,
+        user_message: str,
+        conversation_summary: str,
+        active_goal: str,
+        stage: str,
+        pending_action: str,
+        pending_question: str,
+        appointment_slots: dict[str, Any],
+        last_tool_result: str,
+        last_user_message: str,
+        last_assistant_message: str,
+        memories: list[str],
+    ) -> StateRoutingDecision:
+        routing_packet = RoutingPacket(
+            user_message=_compact_text(user_message, 400),
+            conversation_summary=_compact_text(conversation_summary, 500),
+            active_goal=_compact_text(active_goal, 80),
+            stage=_compact_text(stage, 80),
+            pending_action=_compact_text(pending_action, 120),
+            pending_question=_compact_text(pending_question, 200),
+            appointment_slots={key: _compact_text(str(value), 120) for key, value in appointment_slots.items()},
+            last_tool_result=_compact_text(last_tool_result, 280),
+            last_user_message=_compact_text(last_user_message, 280),
+            last_assistant_message=_compact_text(last_assistant_message, 280),
+            memories=[_compact_text(memory, 160) for memory in memories[:3]],
+        )
+        guard_hint = self._deterministic_guard(routing_packet)
+        if guard_hint is not None:
+            substep("state_router_guard", "OK", guard_hint.reason)
+            return guard_hint
+
+        decision = await self._llm_service.classify_state_route(routing_packet)
+        if decision.next_node == "rag" and not decision.needs_retrieval:
+            decision.needs_retrieval = True
+        substep(
+            "state_router_llm",
+            "OK",
+            f"next={decision.next_node} intent={decision.intent} confidence={decision.confidence:.2f}",
+        )
+        return decision
+
+    def summarize_memories(self, memories: list[str]) -> list[str]:
+        summarized: list[str] = []
+        for memory in memories[:3]:
+            compact = _compact_text(memory, 140)
+            if compact:
+                summarized.append(compact)
+        return summarized
+
+    def _deterministic_guard(self, routing_packet: RoutingPacket) -> StateRoutingDecision | None:
+        user_message = routing_packet.user_message.lower().strip()
+        if not user_message:
+            return StateRoutingDecision(
+                next_node="conversation",
+                intent="conversation",
+                confidence=0.3,
+                needs_retrieval=False,
+                state_update={},
+                reason="empty-message",
             )
-            return None
 
-        encoder_kwargs: dict[str, Any] = {
-            "name": self._settings.openai_embedding_model,
-            "openai_api_key": self._settings.openai_api_key,
+        if self._appointment_follow_up(routing_packet, user_message):
+            return StateRoutingDecision(
+                next_node="appointment",
+                intent="appointment",
+                confidence=0.95,
+                needs_retrieval=False,
+                state_update={
+                    "active_goal": "appointment",
+                    "stage": "collecting_slots",
+                    "pending_action": "collecting_slots",
+                },
+                reason="appointment-follow-up",
+            )
+
+        if self._explicit_appointment_request(user_message):
+            return StateRoutingDecision(
+                next_node="appointment",
+                intent="appointment",
+                confidence=0.92,
+                needs_retrieval=False,
+                state_update={
+                    "active_goal": "appointment",
+                    "stage": "collecting_slots",
+                    "pending_action": "collecting_slots",
+                },
+                reason="appointment-request",
+            )
+
+        if self._explicit_rag_request(user_message):
+            return StateRoutingDecision(
+                next_node="rag",
+                intent="rag",
+                confidence=0.86,
+                needs_retrieval=True,
+                state_update={
+                    "active_goal": "information",
+                    "stage": "lookup",
+                },
+                reason="information-request",
+            )
+
+        if self._is_simple_conversation(user_message):
+            return StateRoutingDecision(
+                next_node="conversation",
+                intent="conversation",
+                confidence=0.9,
+                needs_retrieval=False,
+                state_update={
+                    "active_goal": routing_packet.active_goal or "conversation",
+                    "stage": routing_packet.stage or "open",
+                },
+                reason="simple-conversation",
+            )
+
+        return None
+
+    def _appointment_follow_up(self, routing_packet: RoutingPacket, user_message: str) -> bool:
+        active_appointment = routing_packet.active_goal == "appointment" or routing_packet.stage in {
+            "collecting_slots",
+            "ready_for_handoff",
         }
-        if self._settings.openai_base_url:
-            encoder_kwargs["openai_base_url"] = self._settings.openai_base_url.rstrip("/")
-        encoder = OpenAIEncoder(**encoder_kwargs)
-        routes = [Route(name=item["name"], utterances=item["utterances"], score_threshold=item["score_threshold"]) for item in ROUTE_DEFINITIONS]
-        return SemanticRouter(
-            encoder=encoder,
-            routes=routes,
-            index=LocalIndex(),
-            auto_sync="local",
+        if not active_appointment:
+            return False
+        if routing_packet.pending_question:
+            return True
+        if routing_packet.appointment_slots and len(user_message) <= 40:
+            return True
+        return bool(
+            re.search(
+                r"\b(si|sí|no|claro|mañana|manana|hoy|tarde|noche|am|pm|\d{1,2}:\d{2}|\d{1,2}\s?am|\d{1,2}\s?pm)\b",
+                user_message,
+            )
         )
 
-    async def route_intent(self, user_message: str, memories: list[str]) -> IntentDecision:
-        if self._router is None:
-            return self._fallback_route(user_message)
+    def _explicit_appointment_request(self, user_message: str) -> bool:
+        appointment_keywords = (
+            "cita",
+            "agendar",
+            "agendo",
+            "reservar",
+            "consulta",
+            "turno",
+            "doctor",
+            "doctora",
+            "programar una visita",
+        )
+        return any(keyword in user_message for keyword in appointment_keywords)
 
-        try:
-            router_input = self._build_router_input(user_message, memories)
-            substep(
-                "router_prompt_compose",
-                "OK",
-                f"msg_chars={len(user_message)} memories={len(memories)} router_chars={len(router_input)}",
-            )
-            log_router_input(router_input)
-            if self._debug:
-                await self._log_route_diagnostics(router_input, user_message)
-            route_choice = await self._router.acall(router_input)
-            route_name = getattr(route_choice, "name", None)
-            score = self._extract_score(route_choice)
-            if not route_name:
-                substep("router_match", "WARN", "no semantic match, using fallback")
-                return self._fallback_route(user_message)
+    def _explicit_rag_request(self, user_message: str) -> bool:
+        rag_keywords = (
+            "horario",
+            "horarios",
+            "precio",
+            "costo",
+            "costos",
+            "servicio",
+            "servicios",
+            "doctor",
+            "doctores",
+            "especialidad",
+            "especialidades",
+            "direccion",
+            "ubicacion",
+            "ubicados",
+            "política",
+            "politica",
+            "pago",
+            "pagos",
+        )
+        return any(keyword in user_message for keyword in rag_keywords)
 
-            confidence = self._normalize_score(score)
-            score_text = f"{score:.3f}" if score is not None else "n/a"
-            substep("router_match", "OK", f"route={route_name} score={score_text}")
-            return IntentDecision(
-                intent=route_name,
-                confidence=confidence,
-                reason=f"semantic-router:{route_name}:{score:.3f}" if score is not None else f"semantic-router:{route_name}",
-            )
-        except Exception as exc:
-            logger.warning("semantic-router failed, using fallback: %s", exc)
-            substep("router_fallback", "WARN", "semantic-router error")
-            return self._fallback_route(user_message)
-
-    async def _log_route_diagnostics(self, router_input: str, user_message: str) -> None:
-        if self._router is None:
-            return
-
-        try:
-            if not (await self._router.index.ais_ready()):
-                await self._router._async_init_index_state()
-
-            vector = await self._router._async_encode(text=[router_input], input_type="queries")
-            scores, routes = await self._router.index.aquery(vector=vector[0], top_k=self._router.top_k)
-            query_results = [{"route": route, "score": score.item()} for route, score in zip(routes, scores)]
-            scored_routes = self._router._score_routes(query_results=query_results)
-
-            substep("router_input_preview", "OK", _compact_text(user_message, max_len=140))
-            if not scored_routes:
-                substep("router_scores", "WARN", "sin resultados del indice")
-                return
-
-            for route_name, total_score, _ in scored_routes[:3]:
-                route = self._router.check_for_matching_routes(top_class=route_name)
-                threshold = getattr(route, "score_threshold", None) if route is not None else None
-                threshold_text = f"{threshold:.3f}" if isinstance(threshold, (float, int)) else "n/a"
-                passed_text = "pasa" if threshold is None or total_score >= threshold else "no pasa"
-                substep(
-                    "router_scores",
-                    "OK",
-                    f"{route_name}: score={total_score:.3f} threshold={threshold_text} {passed_text}",
-                )
-        except Exception as exc:
-            substep("router_scores", "WARN", f"no pude calcular diagnostico: {type(exc).__name__}: {exc}")
-
-    def _build_router_input(self, user_message: str, memories: list[str]) -> str:
-        sections = [f"Mensaje actual:\n{_compact_text(user_message, max_len=400)}"]
-
-        memory_lines = [_compact_text(memory, max_len=120) for memory in memories[:2] if memory.strip()]
-        if memory_lines:
-            sections.append("Memoria relevante del usuario:\n- " + "\n- ".join(memory_lines))
-
-        return "\n\n".join(sections)
-
-    def _extract_score(self, route_choice: Any) -> float | None:
-        score = getattr(route_choice, "similarity_score", None)
-        if score is None:
-            score = getattr(route_choice, "score", None)
-        if score is None:
-            return None
-        try:
-            return float(score)
-        except (TypeError, ValueError):
-            return None
-
-    def _normalize_score(self, score: float | None) -> float:
-        if score is None:
-            return 0.0
-        return max(0.0, min(1.0, score))
-
-    def _fallback_route(self, user_message: str) -> IntentDecision:
-        lowered = user_message.lower()
-        appointment_keywords = ("cita", "agendar", "agendo", "reservar", "consulta", "doctor", "doctora")
-        rag_keywords = ("precio", "costo", "horario", "horarios", "doctor", "especialidad", "servicio", "direccion")
-        if any(word in lowered for word in appointment_keywords):
-            return IntentDecision(intent="appointment_intent", confidence=0.72, reason="heuristic-fallback")
-        if any(word in lowered for word in rag_keywords):
-            return IntentDecision(intent="rag", confidence=0.60, reason="heuristic-fallback")
-        return IntentDecision(intent="conversation", confidence=0.55, reason="heuristic-fallback")
+    def _is_simple_conversation(self, user_message: str) -> bool:
+        compact = " ".join(user_message.split())
+        if compact in {"hola", "buenas", "buenos dias", "buenas tardes", "gracias", "ok", "okay", "si", "sí"}:
+            return True
+        if len(compact) <= 6:
+            return True
+        return any(marker in compact for marker in ("hola", "gracias", "perfecto", "entendido"))
 
 
 def _compact_text(value: str, max_len: int) -> str:

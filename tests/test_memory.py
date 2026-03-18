@@ -4,6 +4,7 @@ from app.services.memory import (
     Mem0LocalMemoryStore,
     Mem0PlatformMemoryStore,
     _normalize_mem0_search_results,
+    should_store_memory,
 )
 
 
@@ -65,3 +66,28 @@ def test_mem0_platform_search_normalizes_dict_results():
     memories = asyncio.run(store.search("789", "agendar cita", limit=2))
 
     assert memories == ["Prefiere WhatsApp", "No disponible por la tarde"]
+
+
+def test_should_store_memory_skips_trivial_turns():
+    memories = should_store_memory("hola", "Hola, te ayudo con gusto", "conversation", {})
+
+    assert memories == []
+
+
+def test_should_store_memory_persists_appointment_facts():
+    memories = should_store_memory(
+        "Quiero cita con dermatologia manana",
+        "Perfecto, lo paso a recepcion",
+        "appointment",
+        {
+            "appointment_slots": {
+                "patient_name": "Juan Perez",
+                "reason": "dermatologia",
+                "preferred_date": "manana",
+                "preferred_time": "10 am",
+            }
+        },
+    )
+
+    assert memories
+    assert memories[0].kind == "profile"

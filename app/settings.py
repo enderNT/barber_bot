@@ -20,8 +20,11 @@ class Settings(BaseSettings):
     openai_embedding_model: str = "text-embedding-3-small"
     openai_timeout_seconds: int = 30
     openai_temperature: float = 0.1
-    semantic_router_debug: bool = False
-    router_input_debug: bool = False
+    state_router_confidence_threshold: float = 0.62
+    state_router_retrieval_threshold: float = 0.58
+    summary_refresh_turn_threshold: int = 4
+    summary_refresh_char_threshold: int = 900
+    memory_search_limit: int = 3
 
     clinic_config_path: Path = Field(default=Path("config/clinic.json"))
 

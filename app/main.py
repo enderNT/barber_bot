@@ -6,13 +6,12 @@ from fastapi import FastAPI
 
 from app.graph.workflow import ClinicWorkflow
 from app.observability.flow_logger import configure_flow_logger
-from app.observability.router_input_logger import configure_router_input_logger
 from app.services.agent import ClinicAgentService
 from app.services.chatwoot import ChatwootClient
 from app.services.clinic_config import ClinicConfigLoader
 from app.services.llm import ClinicLLMService, OpenAIClient
 from app.services.memory import build_memory_store
-from app.services.router import ClinicIntentRouterService
+from app.services.router import StateRoutingService
 from app.services.qdrant import QdrantRetrievalService
 from app.settings import get_settings
 from app.webhooks.routes import build_webhook_router
@@ -26,15 +25,14 @@ def create_app() -> FastAPI:
         datefmt="%Y-%m-%d %H:%M:%S",
     )
     configure_flow_logger(getattr(logging, settings.log_level.upper(), logging.INFO))
-    configure_router_input_logger(settings.router_input_debug)
 
     clinic_config_loader = ClinicConfigLoader(settings.clinic_config_path)
     openai_client = OpenAIClient(settings)
-    router_service = ClinicIntentRouterService(settings)
     llm_service = ClinicLLMService(openai_client)
+    router_service = StateRoutingService(settings, llm_service)
     memory_store = build_memory_store(settings)
     qdrant_service = QdrantRetrievalService(settings)
-    workflow = ClinicWorkflow(router_service, llm_service, memory_store, clinic_config_loader, qdrant_service)
+    workflow = ClinicWorkflow(router_service, llm_service, memory_store, clinic_config_loader, qdrant_service, settings)
     agent_service = ClinicAgentService(workflow, ChatwootClient(settings))
 
     app = FastAPI(title="Clinica Assistant", version="0.1.0")

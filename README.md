@@ -1,14 +1,13 @@
 # Clinica Assistant
 
-Backend en Python para una clinica que recibe mensajes por webhook de Chatwoot, usa `OpenAI` para generacion y `semantic-router` para enrutamiento semantico, orquesta con `LangGraph`, mantiene continuidad conversacional con `mem0` y prepara recuperacion RAG con `Qdrant`.
+Backend en Python para una clinica que recibe mensajes por webhook de Chatwoot, usa `OpenAI` para generacion y clasificacion de estado, orquesta con `LangGraph`, mantiene continuidad conversacional corta con estado de hilo y memoria duradera con `mem0`, y prepara recuperacion RAG con `Qdrant`.
 
 ## Componentes
 
 - `FastAPI` para el webhook `POST`.
-- `LangGraph` para el flujo conversacional.
-- `OpenAI` como proveedor remoto de generacion.
-- `semantic-router` de Aurelio Labs para el enrutamiento semantico.
-- `mem0` para memoria de usuario/conversacion.
+- `LangGraph` para el flujo conversacional con estado corto por `conversation_id`.
+- `OpenAI` como proveedor remoto de generacion, resumen y clasificacion de estado.
+- `mem0` para memoria duradera filtrada.
 - `Qdrant` como vector store para el nodo RAG, con modo de simulacion habilitado por defecto.
 - Configuracion local estatica para servicios, horarios, doctores y politicas, cargada solo cuando la rama de RAG o cita la necesita.
 
@@ -41,13 +40,6 @@ cp .env.example .env
 export OPENAI_API_KEY="..."
 export OPENAI_MODEL="gpt-5-mini"
 ```
-
-Si quieres ver el `router_input` completo en logs, activa:
-
-```bash
-export ROUTER_INPUT_DEBUG=true
-```
-
 6. Ejecutar la API:
 
 ```bash
@@ -69,9 +61,9 @@ Opcionalmente define `NGROK_AUTHTOKEN` y `NGROK_DOMAIN` en `.env` si quieres aut
 
 1. Chatwoot envia un `POST` al webhook.
 2. La API responde inmediatamente con un acuse.
-3. En segundo plano se arma el contexto minimo con mensaje y memoria.
-4. LangGraph decide entre conversacion general, RAG o intencion de cita usando `semantic-router` con embeddings de OpenAI.
-5. Solo si la rama es `rag` o `appointment_intent`, se carga `config/clinic.json` para construir el contexto clinico completo.
+3. En segundo plano se recuperan pocas memorias relevantes de `mem0` y el estado corto del hilo viaja en `LangGraph`.
+4. Un router de estado aplica guards deterministas y, si hace falta, un clasificador LLM para decidir entre conversacion general, RAG o cita.
+5. Solo si la rama es `rag` o `appointment`, se carga `config/clinic.json` para construir el contexto clinico completo.
 6. La respuesta se envia por la API de Chatwoot si esta habilitada; si no, queda registrada en logs.
 
 ## Git

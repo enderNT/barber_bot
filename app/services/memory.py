@@ -5,6 +5,7 @@ from collections.abc import Iterable, Mapping
 from itertools import islice
 from typing import Any, Protocol
 
+from app.models.schemas import MemoryRecord
 from app.settings import Settings
 
 logger = logging.getLogger(__name__)
@@ -62,7 +63,7 @@ class MemoryStore(Protocol):
     async def search(self, contact_id: str, query: str, limit: int = 5) -> list[str]:
         ...
 
-    async def save_exchange(self, contact_id: str, user_message: str, assistant_message: str) -> None:
+    async def save_memories(self, contact_id: str, memories: list[MemoryRecord]) -> None:
         ...
 
 
@@ -75,10 +76,11 @@ class InMemoryMemoryStore:
         memories = self._store.get(contact_id, [])
         return memories[-limit:]
 
-    async def save_exchange(self, contact_id: str, user_message: str, assistant_message: str) -> None:
+    async def save_memories(self, contact_id: str, memories: list[MemoryRecord]) -> None:
         snippets = self._store.setdefault(contact_id, [])
-        snippets.append(f"Usuario: {user_message}")
-        snippets.append(f"Asistente: {assistant_message}")
+        for memory in memories:
+            if memory.text not in snippets:
+                snippets.append(memory.text)
 
 
 class Mem0LocalMemoryStore:
@@ -91,11 +93,10 @@ class Mem0LocalMemoryStore:
         results = self._client.search(query, filters={"user_id": contact_id}, limit=limit)
         return _normalize_mem0_search_results(results, limit=limit)
 
-    async def save_exchange(self, contact_id: str, user_message: str, assistant_message: str) -> None:
-        messages = [
-            {"role": "user", "content": user_message},
-            {"role": "assistant", "content": assistant_message},
-        ]
+    async def save_memories(self, contact_id: str, memories: list[MemoryRecord]) -> None:
+        if not memories:
+            return
+        messages = [{"role": "system", "content": memory.text} for memory in memories]
         self._client.add(messages, user_id=contact_id)
 
 
@@ -116,11 +117,10 @@ class Mem0PlatformMemoryStore:
         results = self._client.search(query, filters={"user_id": contact_id}, top_k=limit)
         return _normalize_mem0_search_results(results, limit=limit)
 
-    async def save_exchange(self, contact_id: str, user_message: str, assistant_message: str) -> None:
-        messages = [
-            {"role": "user", "content": user_message},
-            {"role": "assistant", "content": assistant_message},
-        ]
+    async def save_memories(self, contact_id: str, memories: list[MemoryRecord]) -> None:
+        if not memories:
+            return
+        messages = [{"role": "system", "content": memory.text} for memory in memories]
         self._client.add(messages, user_id=contact_id)
 
 
@@ -133,3 +133,91 @@ def build_memory_store(settings: Settings) -> MemoryStore:
     except Exception as exc:  # pragma: no cover - depende de entorno externo
         logger.warning("Falling back to in-memory store because mem0 failed to initialize: %s", exc)
     return InMemoryMemoryStore()
+
+
+def should_store_memory(user_message: str, assistant_message: str, route: str, state: dict[str, Any]) -> list[MemoryRecord]:
+    lowered_user = user_message.lower().strip()
+    lowered_assistant = assistant_message.lower().strip()
+    memories: list[MemoryRecord] = []
+
+    if route == "appointment":
+        slots = state.get("appointment_slots") or {}
+        relevant_bits = []
+        for key in ("patient_name", "reason", "preferred_date", "preferred_time"):
+            value = slots.get(key)
+            if value:
+                relevant_bits.append(f"{key}={value}")
+        if relevant_bits:
+            memories.append(
+                MemoryRecord(
+                    kind="profile",
+                    text="Preferencias de cita: " + ", ".join(relevant_bits),
+                )
+            )
+        elif lowered_user and not _is_trivial_turn(lowered_user):
+            memories.append(
+                MemoryRecord(
+                    kind="episode",
+                    text=f"El usuario solicito apoyo para agendar una cita: {user_message}",
+                )
+            )
+        return memories
+
+    if _is_trivial_turn(lowered_user):
+        return memories
+
+    if _looks_like_persistent_preference(lowered_user):
+        memories.append(
+            MemoryRecord(
+                kind="profile",
+                text=f"Preferencia del usuario: {user_message}",
+            )
+        )
+        return memories
+
+    if route == "rag" and lowered_assistant:
+        memories.append(
+            MemoryRecord(
+                kind="episode",
+                text=f"Consulta informativa resuelta sobre: {user_message}",
+            )
+        )
+        return memories
+
+    if lowered_assistant and len(lowered_user) >= 18:
+        memories.append(
+            MemoryRecord(
+                kind="episode",
+                text=f"Conversacion util: {user_message} -> {assistant_message}",
+            )
+        )
+    return memories
+
+
+def _is_trivial_turn(user_message: str) -> bool:
+    trivial_phrases = {
+        "hola",
+        "buenas",
+        "buenos dias",
+        "buenas tardes",
+        "gracias",
+        "ok",
+        "okay",
+        "si",
+        "no",
+    }
+    compact = " ".join(user_message.split())
+    return compact in trivial_phrases or len(compact) <= 3
+
+
+def _looks_like_persistent_preference(user_message: str) -> bool:
+    preference_markers = (
+        "prefiero",
+        "me gusta",
+        "solo por",
+        "no puedo",
+        "no puedo por",
+        "por favor escribeme",
+        "mejor por",
+    )
+    return any(marker in user_message for marker in preference_markers)

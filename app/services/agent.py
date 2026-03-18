@@ -20,12 +20,12 @@ class ClinicAgentService:
         bind_flow(flow_id or payload.conversation_id, payload.conversation_id)
         start_flow(payload.latest_message)
         try:
-            step("2. semantic_routing_and_graph", "RUN", "ejecutando LangGraph")
+            step("2. state_routing_and_graph", "RUN", "ejecutando LangGraph")
             result = await self._workflow.run(payload)
             step(
-                "2. semantic_routing_and_graph",
+                "2. state_routing_and_graph",
                 "OK",
-                f"intent={result.get('intent')} confidence={result.get('routing_confidence', 0):.2f}",
+                f"intent={result.get('intent')} confidence={result.get('confidence', 0):.2f}",
             )
 
             response_text = result.get("response_text")
@@ -44,7 +44,7 @@ class ClinicAgentService:
             else:
                 substep("4. outbound_response", "WARN", "sin response_text para enviar")
 
-            end_flow("OK", f"branch={result.get('intent', 'unknown')}")
+            end_flow("OK", f"branch={result.get('next_node', result.get('intent', 'unknown'))}")
             return result
         except Exception as exc:
             mark_error("flow_execution", exc)

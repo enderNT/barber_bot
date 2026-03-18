@@ -15,10 +15,61 @@ class AppointmentIntentPayload(BaseModel):
     confidence: float = 0.0
 
 
-class IntentDecision(BaseModel):
-    intent: Literal["conversation", "rag", "appointment_intent"] = "conversation"
+class RoutingPacket(BaseModel):
+    user_message: str
+    conversation_summary: str = ""
+    active_goal: str = ""
+    stage: str = ""
+    pending_action: str = ""
+    pending_question: str = ""
+    appointment_slots: dict[str, Any] = Field(default_factory=dict)
+    last_tool_result: str = ""
+    last_user_message: str = ""
+    last_assistant_message: str = ""
+    memories: list[str] = Field(default_factory=list)
+
+
+class StateRoutingDecision(BaseModel):
+    next_node: Literal["conversation", "rag", "appointment"] = "conversation"
+    intent: str = "conversation"
     confidence: float = 0.0
+    needs_retrieval: bool = False
+    state_update: dict[str, Any] = Field(default_factory=dict)
     reason: str = ""
+
+
+class RouteStateUpdate(BaseModel):
+    active_goal: str | None = None
+    stage: str | None = None
+    pending_action: str | None = None
+    pending_question: str | None = None
+    appointment_slots: dict[str, Any] | None = None
+    conversation_summary: str | None = None
+    last_tool_result: str | None = None
+    last_user_message: str | None = None
+    last_assistant_message: str | None = None
+    turn_count: int | None = None
+    clear_last_tool_result: bool = False
+    clear_pending_action: bool = False
+    clear_pending_question: bool = False
+    clear_appointment_slots: bool = False
+
+
+class MemoryRecord(BaseModel):
+    kind: Literal["profile", "episode"]
+    text: str
+    source: str = "stateful-flow"
+
+
+class GraphTurnOutcome(BaseModel):
+    next_node: Literal["conversation", "rag", "appointment"] = "conversation"
+    response_text: str = ""
+    intent: str = "conversation"
+    confidence: float = 0.0
+    needs_retrieval: bool = False
+    handoff_required: bool = False
+    appointment_payload: dict[str, Any] = Field(default_factory=dict)
+    routing_reason: str = ""
 
 
 class ClinicConfig(BaseModel):

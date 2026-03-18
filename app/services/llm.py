@@ -7,7 +7,7 @@ from typing import Any
 
 from openai import AsyncOpenAI
 
-from app.models.schemas import AppointmentIntentPayload
+from app.models.schemas import AppointmentIntentPayload, RoutingPacket, StateRoutingDecision
 from app.observability.flow_logger import mark_error, step, substep
 from app.settings import Settings
 
@@ -130,8 +130,92 @@ class ClinicLLMService:
                 "Si necesitas un dato que no aparece en el contexto actual, lo canalizo con recepcion."
             )
 
+    async def build_state_summary(
+        self,
+        current_summary: str,
+        user_message: str,
+        assistant_message: str,
+        active_goal: str,
+        stage: str,
+    ) -> str:
+        if not user_message.strip() and not assistant_message.strip():
+            return current_summary
+
+        system_prompt = (
+            "Actualiza un resumen corto de estado conversacional. "
+            "Mantente en una o dos frases. No repitas texto inutil."
+        )
+        user_prompt = (
+            f"Resumen actual: {current_summary or 'n/a'}\n"
+            f"Objetivo activo: {active_goal or 'n/a'}\n"
+            f"Etapa: {stage or 'n/a'}\n"
+            f"Ultimo mensaje del usuario: {user_message}\n"
+            f"Ultima respuesta del asistente: {assistant_message}\n"
+            "Devuelve solo el resumen actualizado."
+        )
+        try:
+            substep("summary_prompt_compose", "OK", f"summary_chars={len(current_summary)}")
+            return await self._client.chat_text(
+                [
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt},
+                ],
+                temperature=0.2,
+            )
+        except Exception as exc:
+            logger.warning("Summary refresh failed, using compact fallback: %s", exc)
+            substep("summary_fallback", "WARN", "resumen compacto")
+            fragments = [current_summary.strip(), f"Usuario: {user_message.strip()}", f"Asistente: {assistant_message.strip()}"]
+            return " ".join(fragment for fragment in fragments if fragment).strip()
+
+    async def classify_state_route(
+        self,
+        routing_packet: RoutingPacket,
+        guard_hint: dict[str, Any] | None = None,
+    ) -> StateRoutingDecision:
+        system_prompt = (
+            "Eres un clasificador de estado para un asistente de clinica. "
+            "Debes devolver JSON estricto con next_node, intent, confidence, needs_retrieval, state_update y reason. "
+            "Los valores permitidos para next_node son conversation, rag, appointment. "
+            "Usa guards y el estado para decidir continuidad conversacional."
+        )
+        user_prompt = json.dumps(
+            {
+                "routing_packet": routing_packet.model_dump(),
+                "guard_hint": guard_hint or {},
+            },
+            ensure_ascii=False,
+            indent=2,
+        )
+        try:
+            substep("state_router_prompt_compose", "OK", f"packet_chars={len(user_prompt)}")
+            payload = await self._client.chat_json(
+                [
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt},
+                ],
+                temperature=0.0,
+            )
+            decision = StateRoutingDecision.model_validate(payload)
+            substep(
+                "state_router_json_parse",
+                "OK",
+                f"next_node={decision.next_node} confidence={decision.confidence:.2f}",
+            )
+            return decision
+        except Exception as exc:
+            logger.warning("State classification failed, using safe fallback: %s", exc)
+            substep("state_router_fallback", "WARN", "clasificador degradado")
+            return self._fallback_state_route(routing_packet, guard_hint or {})
+
     async def extract_appointment_intent(
-        self, user_message: str, memories: list[str], clinic_context: str, contact_name: str
+        self,
+        user_message: str,
+        memories: list[str],
+        clinic_context: str,
+        contact_name: str,
+        current_slots: dict[str, Any] | None = None,
+        pending_question: str | None = None,
     ) -> tuple[AppointmentIntentPayload, str]:
         system_prompt = (
             "Extrae intencion de cita. Devuelve JSON estricto con llaves: "
@@ -140,6 +224,8 @@ class ClinicLLMService:
         user_prompt = (
             f"Nombre de contacto: {contact_name}\n"
             f"Memorias relevantes: {memories}\n"
+            f"Slots actuales: {current_slots or {}}\n"
+            f"Pendiente: {pending_question or 'n/a'}\n"
             f"Contexto clinico:\n{clinic_context}\n"
             f"Mensaje: {user_message}\n"
             "Si faltan datos, listalos en missing_fields."
@@ -157,11 +243,14 @@ class ClinicLLMService:
         except Exception as exc:
             logger.warning("OpenAI appointment extraction failed, using heuristic fallback: %s", exc)
             substep("appointment_fallback", "WARN", "extraccion heuristica")
-            appointment = self._fallback_appointment(user_message, contact_name)
+            appointment = self._fallback_appointment(user_message, contact_name, current_slots=current_slots or {})
         reply = self._build_appointment_reply(appointment)
         return appointment, reply
 
-    def _fallback_appointment(self, user_message: str, contact_name: str) -> AppointmentIntentPayload:
+    def _fallback_appointment(
+        self, user_message: str, contact_name: str, current_slots: dict[str, Any] | None = None
+    ) -> AppointmentIntentPayload:
+        current_slots = current_slots or {}
         lowered = user_message.lower()
         reason = None
         for specialty in ("pediatria", "medicina general", "dermatologia", "ginecologia", "cardiologia"):
@@ -170,21 +259,27 @@ class ClinicLLMService:
                 break
         date_match = re.search(r"\b(\d{1,2}/\d{1,2}/\d{2,4}|manana|hoy|lunes|martes|miercoles|jueves|viernes|sabado)\b", lowered)
         time_match = re.search(r"\b(\d{1,2}:\d{2}\s?(?:am|pm)?|\d{1,2}\s?(?:am|pm))\b", lowered)
-        patient_name = contact_name if contact_name and contact_name != "Paciente" else None
+        patient_name = (
+            current_slots.get("patient_name")
+            or (contact_name if contact_name and contact_name != "Paciente" else None)
+        )
+        reason = current_slots.get("reason") or reason
+        preferred_date = current_slots.get("preferred_date") or (date_match.group(1) if date_match else None)
+        preferred_time = current_slots.get("preferred_time") or (time_match.group(1) if time_match else None)
         missing_fields = []
         if not patient_name:
             missing_fields.append("patient_name")
         if not reason:
             missing_fields.append("reason")
-        if not date_match:
+        if not preferred_date:
             missing_fields.append("preferred_date")
-        if not time_match:
+        if not preferred_time:
             missing_fields.append("preferred_time")
         return AppointmentIntentPayload(
             patient_name=patient_name,
             reason=reason,
-            preferred_date=date_match.group(1) if date_match else None,
-            preferred_time=time_match.group(1) if time_match else None,
+            preferred_date=preferred_date,
+            preferred_time=preferred_time,
             missing_fields=missing_fields,
             should_handoff=True,
             confidence=0.65,
@@ -207,6 +302,55 @@ class ClinicLLMService:
         return (
             "Ya tengo lo necesario para preparar tu solicitud de cita. "
             "La pasare a recepcion con el motivo y la preferencia de fecha/hora para confirmacion."
+        )
+
+    def _fallback_state_route(
+        self, routing_packet: RoutingPacket, guard_hint: dict[str, Any]
+    ) -> StateRoutingDecision:
+        user_message = routing_packet.user_message.lower()
+        if guard_hint.get("force_node") == "appointment":
+            return StateRoutingDecision(
+                next_node="appointment",
+                intent="appointment",
+                confidence=0.88,
+                needs_retrieval=False,
+                state_update=guard_hint.get("state_update", {}),
+                reason="guard-hint",
+            )
+        if guard_hint.get("force_node") == "rag":
+            return StateRoutingDecision(
+                next_node="rag",
+                intent="rag",
+                confidence=0.84,
+                needs_retrieval=True,
+                state_update=guard_hint.get("state_update", {}),
+                reason="guard-hint",
+            )
+        if any(word in user_message for word in ("cita", "agendar", "reservar", "consulta", "turno")):
+            return StateRoutingDecision(
+                next_node="appointment",
+                intent="appointment",
+                confidence=0.74,
+                needs_retrieval=False,
+                state_update={"active_goal": "appointment", "stage": "collecting_slots"},
+                reason="heuristic-fallback",
+            )
+        if any(word in user_message for word in ("horario", "precio", "costo", "servicio", "doctor", "especialidad")):
+            return StateRoutingDecision(
+                next_node="rag",
+                intent="rag",
+                confidence=0.66,
+                needs_retrieval=True,
+                state_update={"active_goal": "information", "stage": "lookup"},
+                reason="heuristic-fallback",
+            )
+        return StateRoutingDecision(
+            next_node="conversation",
+            intent="conversation",
+            confidence=0.58,
+            needs_retrieval=False,
+            state_update={"active_goal": routing_packet.active_goal or "conversation", "stage": routing_packet.stage or "open"},
+            reason="heuristic-fallback",
         )
 
 
