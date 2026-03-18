@@ -108,12 +108,12 @@ class ClinicIntentRouterService:
             auto_sync="local",
         )
 
-    async def route_intent(self, user_message: str, memories: list[str], clinic_context: str) -> IntentDecision:
+    async def route_intent(self, user_message: str, memories: list[str]) -> IntentDecision:
         if self._router is None:
             return self._fallback_route(user_message)
 
         try:
-            router_input = self._build_router_input(user_message, memories, clinic_context)
+            router_input = self._build_router_input(user_message, memories)
             substep(
                 "router_prompt_compose",
                 "OK",
@@ -172,54 +172,14 @@ class ClinicIntentRouterService:
         except Exception as exc:
             substep("router_scores", "WARN", f"no pude calcular diagnostico: {type(exc).__name__}: {exc}")
 
-    def _build_router_input(self, user_message: str, memories: list[str], clinic_context: str) -> str:
+    def _build_router_input(self, user_message: str, memories: list[str]) -> str:
         sections = [f"Mensaje actual:\n{_compact_text(user_message, max_len=400)}"]
 
         memory_lines = [_compact_text(memory, max_len=120) for memory in memories[:2] if memory.strip()]
         if memory_lines:
             sections.append("Memoria relevante del usuario:\n- " + "\n- ".join(memory_lines))
 
-        clinic_hints = self._build_clinic_hints(user_message, clinic_context)
-        if clinic_hints:
-            sections.append(f"Referencia clinica:\n{clinic_hints}")
-
         return "\n\n".join(sections)
-
-    def _build_clinic_hints(self, user_message: str, clinic_context: str) -> str:
-        lowered = user_message.lower()
-        if not any(
-            word in lowered
-            for word in ("horario", "horarios", "precio", "costo", "doctor", "doctora", "especialidad", "servicio", "ubicacion", "direccion")
-        ):
-            return ""
-
-        services = self._extract_section_items(clinic_context, "Servicios:", "Doctores:")
-        doctors = self._extract_section_items(clinic_context, "Doctores:", "Horarios:")
-        hours = self._extract_section_items(clinic_context, "Horarios:", "Politicas:")
-
-        hints: list[str] = []
-        if services:
-            hints.append("Servicios: " + "; ".join(services[:3]))
-        if doctors:
-            hints.append("Doctores: " + "; ".join(doctors[:2]))
-        if hours:
-            hints.append("Horarios: " + "; ".join(hours[:2]))
-        return "\n".join(hints)
-
-    def _extract_section_items(self, clinic_context: str, section_start: str, section_end: str) -> list[str]:
-        if section_start not in clinic_context:
-            return []
-
-        section = clinic_context.split(section_start, 1)[1]
-        if section_end in section:
-            section = section.split(section_end, 1)[0]
-
-        items = []
-        for line in section.splitlines():
-            line = line.strip()
-            if line.startswith("- "):
-                items.append(_compact_text(line[2:], max_len=90))
-        return items
 
     def _extract_score(self, route_choice: Any) -> float | None:
         score = getattr(route_choice, "similarity_score", None)

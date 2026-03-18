@@ -60,17 +60,15 @@ class ClinicLLMService:
     def __init__(self, client: OpenAIClient) -> None:
         self._client = client
 
-    async def build_conversation_reply(self, user_message: str, memories: list[str], clinic_context: str) -> str:
+    async def build_conversation_reply(self, user_message: str, memories: list[str]) -> str:
         system_prompt = (
-            "Eres un asistente de una clinica. Responde solo con datos del contexto. "
-            "Si no sabes algo, dilo claramente y ofrece canalizar con recepcion. "
-            "No inventes precios, horarios ni disponibilidad."
+            "Eres un asistente de una clinica. Responde de forma breve, clara y natural. "
+            "Ayuda con la conversacion general y solo canaliza con recepcion si falta un dato."
         )
         user_prompt = (
             f"Memorias relevantes: {memories}\n"
-            f"Contexto clinico:\n{clinic_context}\n"
             f"Pregunta del usuario: {user_message}\n"
-            "Responde en espanol de forma breve, clara y operativa."
+            "Responde en espanol de forma breve y amigable."
         )
         try:
             substep("conversation_prompt_compose", "OK", f"msg_chars={len(user_message)} memories={len(memories)}")

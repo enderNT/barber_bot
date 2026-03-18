@@ -22,7 +22,6 @@ class GraphState(TypedDict, total=False):
     contact_id: str
     contact_name: str
     user_message: str
-    clinic_context: str
     memories: list[str]
     rag_context: str
     intent: str
@@ -82,9 +81,7 @@ class ClinicWorkflow:
     async def _load_context(self, state: GraphState) -> GraphState:
         webhook = state["webhook"]
         try:
-            step("2.1 build_context", "RUN", "cargando config clinica y memoria")
-            clinic_context = self._clinic_config_loader.load().to_context_text()
-            substep("clinic_config", "OK", "config estatica cargada")
+            step("2.1 build_context", "RUN", "cargando memoria y contexto minimo")
             memories = await self._memory_store.search(
                 webhook.contact_id,
                 query=webhook.latest_message or "contexto del usuario",
@@ -97,7 +94,6 @@ class ClinicWorkflow:
                 "contact_id": webhook.contact_id,
                 "contact_name": webhook.contact_name,
                 "user_message": webhook.latest_message,
-                "clinic_context": clinic_context,
                 "memories": memories,
             }
         except Exception as exc:
@@ -110,7 +106,6 @@ class ClinicWorkflow:
             decision = await self._router_service.route_intent(
                 user_message=state["user_message"],
                 memories=state.get("memories", []),
-                clinic_context=state["clinic_context"],
             )
             step(
                 "2.2 intent_router_openai",
@@ -146,7 +141,6 @@ class ClinicWorkflow:
             response_text = await self._llm_service.build_conversation_reply(
                 user_message=state["user_message"],
                 memories=state.get("memories", []),
-                clinic_context=state["clinic_context"],
             )
             step("3.a.1 conversation_node", "OK", f"chars={len(response_text)}")
             return {
@@ -161,10 +155,12 @@ class ClinicWorkflow:
     async def _rag(self, state: GraphState) -> GraphState:
         try:
             step("3.b.1 rag_node", "RUN", "consultando contexto RAG")
+            clinic_context = self._clinic_config_loader.load().to_context_text()
+            substep("clinic_config", "OK", "config estatica cargada")
             rag_context = await self._qdrant_service.build_context(
                 query=state["user_message"] or "contexto del usuario",
                 contact_id=state["contact_id"],
-                clinic_context=state["clinic_context"],
+                clinic_context=clinic_context,
                 memories=state.get("memories", []),
             )
             substep("qdrant_lookup", "OK", "contexto vectorial preparado")
@@ -187,10 +183,12 @@ class ClinicWorkflow:
     async def _appointment(self, state: GraphState) -> GraphState:
         try:
             step("3.c.1 appointment_node", "RUN", "extrayendo datos de cita")
+            clinic_context = self._clinic_config_loader.load().to_context_text()
+            substep("clinic_config", "OK", "config estatica cargada")
             appointment, response_text = await self._llm_service.extract_appointment_intent(
                 user_message=state["user_message"],
                 memories=state.get("memories", []),
-                clinic_context=state["clinic_context"],
+                clinic_context=clinic_context,
                 contact_name=state["contact_name"],
             )
             substep(

@@ -35,34 +35,22 @@ def test_router_builds_enriched_input_with_memories_and_context():
     router_input = service._build_router_input(
         "Quiero una cita para manana",
         ["Prefiere horario vespertino", "Ya fue paciente de dermatologia"],
-        "Clinica: Central\nHorarios: lunes a viernes de 9 a 18\nServicios: dermatologia y medicina general",
     )
 
     assert "Mensaje actual:" in router_input
     assert "Memoria relevante del usuario:" in router_input
-    assert "Referencia clinica:" not in router_input
     assert "Prefiere horario vespertino" in router_input
 
 
-def test_router_uses_compact_clinic_hints_only_for_institutional_questions():
+def test_router_input_ignores_clinic_context_for_all_messages():
     service = ClinicIntentRouterService(Settings(openai_api_key=None))
-
-    clinic_context = (
-        "Clinica: Central\n"
-        "Servicios:\n- Medicina general: 30 min, 450 MXN\n- Pediatria: 45 min, 600 MXN\n"
-        "Doctores:\n- Dra. Elena Ruiz (Medicina general): Lunes a viernes de 09:00 a 14:00\n"
-        "Horarios:\n- monday_to_friday: 09:00-18:00\n"
-        "Politicas:\n- appointments: Las citas nuevas requieren nombre completo.\n"
-    )
 
     router_input = service._build_router_input(
         "Cuales son sus horarios y que doctores atienden?",
         ["Pregunta seguido por medicina general"],
-        clinic_context,
     )
 
-    assert "Referencia clinica:" in router_input
-    assert "Servicios:" in router_input
-    assert "Doctores:" in router_input
-    assert "Horarios:" in router_input
-    assert "appointments:" not in router_input
+    assert "Referencia clinica:" not in router_input
+    assert "Servicios:" not in router_input
+    assert "Doctores:" not in router_input
+    assert "Horarios:" not in router_input

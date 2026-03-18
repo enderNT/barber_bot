@@ -10,7 +10,7 @@ Backend en Python para una clinica que recibe mensajes por webhook de Chatwoot, 
 - `semantic-router` de Aurelio Labs para el enrutamiento semantico.
 - `mem0` para memoria de usuario/conversacion.
 - `Qdrant` como vector store para el nodo RAG, con modo de simulacion habilitado por defecto.
-- Configuracion local estatica para servicios, horarios, doctores y politicas.
+- Configuracion local estatica para servicios, horarios, doctores y politicas, cargada solo cuando la rama de RAG o cita la necesita.
 
 ## Setup local
 
@@ -33,7 +33,7 @@ pip install -e ".[dev]"
 cp .env.example .env
 ```
 
-4. Ajustar `config/clinic.json` con los datos reales de la clinica.
+4. Ajustar `config/clinic.json` con los datos reales de la clinica. Ese archivo alimenta el contexto de RAG y la extraccion de intencion de cita, no el router ni la conversacion general.
 
 5. Exportar credenciales de OpenAI en tu entorno:
 
@@ -63,9 +63,10 @@ Opcionalmente define `NGROK_AUTHTOKEN` y `NGROK_DOMAIN` en `.env` si quieres aut
 
 1. Chatwoot envia un `POST` al webhook.
 2. La API responde inmediatamente con un acuse.
-3. En segundo plano se arma el contexto con mensaje, memoria, config clinica y contexto vectorial Qdrant simulado o real.
+3. En segundo plano se arma el contexto minimo con mensaje y memoria.
 4. LangGraph decide entre conversacion general, RAG o intencion de cita usando `semantic-router` con embeddings de OpenAI.
-5. La respuesta se envia por la API de Chatwoot si esta habilitada; si no, queda registrada en logs.
+5. Solo si la rama es `rag` o `appointment_intent`, se carga `config/clinic.json` para construir el contexto clinico completo.
+6. La respuesta se envia por la API de Chatwoot si esta habilitada; si no, queda registrada en logs.
 
 ## Git
 

@@ -6,8 +6,8 @@ from app.services.clinic_config import ClinicConfigLoader
 
 
 class FakeRouterService:
-    async def route_intent(self, user_message, memories, clinic_context):
-        del memories, clinic_context
+    async def route_intent(self, user_message, memories):
+        del memories
         if "cita" in user_message.lower():
             return IntentDecision(intent="appointment_intent", confidence=0.9, reason="test")
         if "horario" in user_message.lower():
@@ -16,8 +16,8 @@ class FakeRouterService:
 
 
 class FakeLLMService:
-    async def build_conversation_reply(self, user_message, memories, clinic_context):
-        del memories, clinic_context
+    async def build_conversation_reply(self, user_message, memories):
+        del memories
         return f"Respuesta para: {user_message}"
 
     async def build_rag_reply(self, user_message, memories, clinic_context):
