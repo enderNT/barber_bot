@@ -1,11 +1,61 @@
 from __future__ import annotations
 
 import logging
-from typing import Protocol
+from collections.abc import Iterable, Mapping
+from itertools import islice
+from typing import Any, Protocol
 
 from app.settings import Settings
 
 logger = logging.getLogger(__name__)
+
+
+def _unwrap_mem0_results(results: Any) -> Any:
+    current = results
+    for _ in range(3):
+        if not isinstance(current, Mapping):
+            return current
+        for key in ("results", "memories", "items"):
+            if key in current:
+                current = current[key]
+                break
+        else:
+            return current
+    return current
+
+
+def _extract_memory_text(item: Any) -> str:
+    if isinstance(item, Mapping):
+        for key in ("memory", "text", "content"):
+            value = item.get(key)
+            if isinstance(value, str) and value:
+                return value
+        return ""
+    for attr in ("memory", "text", "content"):
+        value = getattr(item, attr, None)
+        if isinstance(value, str) and value:
+            return value
+    return ""
+
+
+def _normalize_mem0_search_results(results: Any, limit: int) -> list[str]:
+    raw_items = _unwrap_mem0_results(results)
+    if raw_items is None:
+        return []
+    if isinstance(raw_items, Mapping):
+        logger.warning("Mem0 search returned an unexpected mapping shape: keys=%s", sorted(raw_items.keys()))
+        return []
+    if isinstance(raw_items, (str, bytes)):
+        raw_items = [raw_items]
+    elif not isinstance(raw_items, Iterable):
+        raw_items = [raw_items]
+
+    memories: list[str] = []
+    for item in islice(raw_items, limit):
+        memory = _extract_memory_text(item)
+        if memory:
+            memories.append(memory)
+    return memories
 
 
 class MemoryStore(Protocol):
@@ -38,8 +88,8 @@ class Mem0LocalMemoryStore:
         self._client = Memory()
 
     async def search(self, contact_id: str, query: str, limit: int = 5) -> list[str]:
-        results = self._client.search(query, filters={"user_id": contact_id})
-        return [item.get("memory", "") for item in results[:limit] if item.get("memory")]
+        results = self._client.search(query, filters={"user_id": contact_id}, limit=limit)
+        return _normalize_mem0_search_results(results, limit=limit)
 
     async def save_exchange(self, contact_id: str, user_message: str, assistant_message: str) -> None:
         messages = [
@@ -63,15 +113,15 @@ class Mem0PlatformMemoryStore:
         self._client = MemoryClient(**client_kwargs)
 
     async def search(self, contact_id: str, query: str, limit: int = 5) -> list[str]:
-        results = self._client.search(query, version="v2", filters={"user_id": contact_id})
-        return [item.get("memory", "") for item in results[:limit] if item.get("memory")]
+        results = self._client.search(query, filters={"user_id": contact_id}, top_k=limit)
+        return _normalize_mem0_search_results(results, limit=limit)
 
     async def save_exchange(self, contact_id: str, user_message: str, assistant_message: str) -> None:
         messages = [
             {"role": "user", "content": user_message},
             {"role": "assistant", "content": assistant_message},
         ]
-        self._client.add(messages, user_id=contact_id, version="v2")
+        self._client.add(messages, user_id=contact_id)
 
 
 def build_memory_store(settings: Settings) -> MemoryStore:
