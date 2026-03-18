@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import logging
 import re
-from typing import Any
+from typing import Any, Literal, Protocol, TypedDict
 
 from openai import AsyncOpenAI
 
@@ -14,18 +14,48 @@ from app.settings import Settings
 logger = logging.getLogger(__name__)
 
 
-class OpenAIClient:
+class LLMMessage(TypedDict):
+    role: Literal["system", "user", "assistant"]
+    content: str
+
+
+class LLMProvider(Protocol):
+    @property
+    def provider_name(self) -> str: ...
+
+    @property
+    def model_name(self) -> str: ...
+
+    async def chat_text(
+        self, messages: list[LLMMessage], temperature: float | None = None
+    ) -> str: ...
+
+    async def chat_json(
+        self, messages: list[LLMMessage], temperature: float | None = None
+    ) -> dict[str, Any]: ...
+
+
+class OpenAICompatibleProvider:
     def __init__(self, settings: Settings) -> None:
-        client_kwargs: dict[str, Any] = {"timeout": settings.openai_timeout_seconds}
-        client_kwargs["api_key"] = settings.openai_api_key or "sk-placeholder"
-        if settings.openai_base_url:
-            client_kwargs["base_url"] = settings.openai_base_url.rstrip("/")
+        client_kwargs: dict[str, Any] = {"timeout": settings.resolved_llm_timeout_seconds}
+        client_kwargs["api_key"] = settings.resolved_llm_api_key or "sk-placeholder"
+        if settings.resolved_llm_base_url:
+            client_kwargs["base_url"] = settings.resolved_llm_base_url.rstrip("/")
         self._client = AsyncOpenAI(**client_kwargs)
-        self._model = settings.openai_model
-        self._temperature = settings.openai_temperature
+        self._provider_name = settings.resolved_llm_provider
+        self._model = settings.resolved_llm_model
+        self._temperature = settings.resolved_llm_temperature
+
+    @property
+    def provider_name(self) -> str:
+        return self._provider_name
+
+    @property
+    def model_name(self) -> str:
+        return self._model
 
     def _chat_request_kwargs(
-        self, messages: list[dict[str, str]], temperature: float | None = None
+        self, messages: list[LLMMessage], temperature: float | None = None
     ) -> dict[str, Any]:
         request_kwargs: dict[str, Any] = {
             "model": self._model,
@@ -44,38 +74,51 @@ class OpenAIClient:
             unsupported_prefixes
         )
 
-    async def chat_text(self, messages: list[dict[str, str]], temperature: float | None = None) -> str:
-        step("2.2.1 openai_chat_completion", "RUN", f"model={self._model}")
+    async def chat_text(self, messages: list[LLMMessage], temperature: float | None = None) -> str:
+        step(
+            "2.2.1 llm_chat_completion",
+            "RUN",
+            f"provider={self.provider_name} model={self.model_name}",
+        )
         try:
             response = await self._client.chat.completions.create(
                 **self._chat_request_kwargs(messages=messages, temperature=temperature),
             )
             content = (response.choices[0].message.content or "").strip()
-            step("2.2.1 openai_chat_completion", "OK", f"response_chars={len(content)}")
+            step("2.2.1 llm_chat_completion", "OK", f"response_chars={len(content)}")
             return content
         except Exception as exc:
-            mark_error("2.2.1 openai_chat_completion", exc)
+            mark_error("2.2.1 llm_chat_completion", exc)
             raise
 
-    async def chat_json(self, messages: list[dict[str, str]], temperature: float | None = None) -> dict[str, Any]:
-        step("2.2.1 openai_chat_completion", "RUN", f"model={self._model} json_mode=True")
+    async def chat_json(self, messages: list[LLMMessage], temperature: float | None = None) -> dict[str, Any]:
+        step(
+            "2.2.1 llm_chat_completion",
+            "RUN",
+            f"provider={self.provider_name} model={self.model_name} json_mode=True",
+        )
         try:
-            request_kwargs = self._chat_request_kwargs(
-                messages=messages, temperature=temperature
-            )
+            request_kwargs = self._chat_request_kwargs(messages=messages, temperature=temperature)
             request_kwargs["response_format"] = {"type": "json_object"}
             response = await self._client.chat.completions.create(**request_kwargs)
             content = (response.choices[0].message.content or "").strip()
-            step("2.2.1 openai_chat_completion", "OK", f"response_chars={len(content)}")
+            step("2.2.1 llm_chat_completion", "OK", f"response_chars={len(content)}")
             return _extract_json(content)
         except Exception as exc:
-            mark_error("2.2.1 openai_chat_completion", exc)
+            mark_error("2.2.1 llm_chat_completion", exc)
             raise
 
 
+def build_llm_provider(settings: Settings) -> LLMProvider:
+    provider_name = settings.resolved_llm_provider
+    if provider_name == "openai_compatible":
+        return OpenAICompatibleProvider(settings)
+    raise ValueError(f"Unsupported llm provider: {provider_name}")
+
+
 class ClinicLLMService:
-    def __init__(self, client: OpenAIClient) -> None:
-        self._client = client
+    def __init__(self, provider: LLMProvider) -> None:
+        self._provider = provider
 
     async def build_conversation_reply(self, user_message: str, memories: list[str]) -> str:
         system_prompt = (
@@ -89,14 +132,14 @@ class ClinicLLMService:
         )
         try:
             substep("conversation_prompt_compose", "OK", f"msg_chars={len(user_message)} memories={len(memories)}")
-            return await self._client.chat_text(
+            return await self._provider.chat_text(
                 [
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": user_prompt},
                 ]
             )
         except Exception as exc:
-            logger.warning("OpenAI conversation failed, using deterministic fallback: %s", exc)
+            logger.warning("LLM conversation failed, using deterministic fallback: %s", exc)
             substep("conversation_fallback", "WARN", "mensaje deterministico")
             return (
                 "Puedo ayudarte con informacion general de la clinica y con solicitudes de cita. "
@@ -116,14 +159,14 @@ class ClinicLLMService:
         )
         try:
             substep("rag_prompt_compose", "OK", f"msg_chars={len(user_message)} memories={len(memories)}")
-            return await self._client.chat_text(
+            return await self._provider.chat_text(
                 [
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": user_prompt},
                 ]
             )
         except Exception as exc:
-            logger.warning("OpenAI rag failed, using deterministic fallback: %s", exc)
+            logger.warning("LLM rag failed, using deterministic fallback: %s", exc)
             substep("rag_fallback", "WARN", "RAG degradado a respuesta segura")
             return (
                 "Puedo responder con la informacion disponible de la clinica. "
@@ -155,7 +198,7 @@ class ClinicLLMService:
         )
         try:
             substep("summary_prompt_compose", "OK", f"summary_chars={len(current_summary)}")
-            return await self._client.chat_text(
+            return await self._provider.chat_text(
                 [
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": user_prompt},
@@ -165,7 +208,11 @@ class ClinicLLMService:
         except Exception as exc:
             logger.warning("Summary refresh failed, using compact fallback: %s", exc)
             substep("summary_fallback", "WARN", "resumen compacto")
-            fragments = [current_summary.strip(), f"Usuario: {user_message.strip()}", f"Asistente: {assistant_message.strip()}"]
+            fragments = [
+                current_summary.strip(),
+                f"Usuario: {user_message.strip()}",
+                f"Asistente: {assistant_message.strip()}",
+            ]
             return " ".join(fragment for fragment in fragments if fragment).strip()
 
     async def classify_state_route(
@@ -189,7 +236,7 @@ class ClinicLLMService:
         )
         try:
             substep("state_router_prompt_compose", "OK", f"packet_chars={len(user_prompt)}")
-            payload = await self._client.chat_json(
+            payload = await self._provider.chat_json(
                 [
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": user_prompt},
@@ -232,7 +279,7 @@ class ClinicLLMService:
         )
         try:
             substep("appointment_prompt_compose", "OK", f"msg_chars={len(user_message)} memories={len(memories)}")
-            payload = await self._client.chat_json(
+            payload = await self._provider.chat_json(
                 [
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": user_prompt},
@@ -241,9 +288,13 @@ class ClinicLLMService:
             appointment = AppointmentIntentPayload.model_validate(payload)
             substep("appointment_json_parse", "OK")
         except Exception as exc:
-            logger.warning("OpenAI appointment extraction failed, using heuristic fallback: %s", exc)
+            logger.warning("LLM appointment extraction failed, using heuristic fallback: %s", exc)
             substep("appointment_fallback", "WARN", "extraccion heuristica")
-            appointment = self._fallback_appointment(user_message, contact_name, current_slots=current_slots or {})
+            appointment = self._fallback_appointment(
+                user_message,
+                contact_name,
+                current_slots=current_slots or {},
+            )
         reply = self._build_appointment_reply(appointment)
         return appointment, reply
 
@@ -257,7 +308,10 @@ class ClinicLLMService:
             if specialty in lowered:
                 reason = specialty
                 break
-        date_match = re.search(r"\b(\d{1,2}/\d{1,2}/\d{2,4}|manana|hoy|lunes|martes|miercoles|jueves|viernes|sabado)\b", lowered)
+        date_match = re.search(
+            r"\b(\d{1,2}/\d{1,2}/\d{2,4}|manana|hoy|lunes|martes|miercoles|jueves|viernes|sabado)\b",
+            lowered,
+        )
         time_match = re.search(r"\b(\d{1,2}:\d{2}\s?(?:am|pm)?|\d{1,2}\s?(?:am|pm))\b", lowered)
         patient_name = (
             current_slots.get("patient_name")
@@ -349,7 +403,10 @@ class ClinicLLMService:
             intent="conversation",
             confidence=0.58,
             needs_retrieval=False,
-            state_update={"active_goal": routing_packet.active_goal or "conversation", "stage": routing_packet.stage or "open"},
+            state_update={
+                "active_goal": routing_packet.active_goal or "conversation",
+                "stage": routing_packet.stage or "open",
+            },
             reason="heuristic-fallback",
         )
 

@@ -1,12 +1,12 @@
 # Clinica Assistant
 
-Backend en Python para una clinica que recibe mensajes por webhook de Chatwoot, usa `OpenAI` para generacion y clasificacion de estado, orquesta con `LangGraph`, mantiene continuidad conversacional corta con estado de hilo y memoria duradera con `mem0`, y prepara recuperacion RAG con `Qdrant`.
+Backend en Python para una clinica que recibe mensajes por webhook de Chatwoot, usa un proveedor `LLM` configurable para generacion y clasificacion de estado, orquesta con `LangGraph`, mantiene continuidad conversacional corta con estado de hilo y memoria duradera con `mem0`, y prepara recuperacion RAG con `Qdrant`.
 
 ## Componentes
 
 - `FastAPI` para el webhook `POST`.
 - `LangGraph` para el flujo conversacional con estado corto por `conversation_id`.
-- `OpenAI` como proveedor remoto de generacion, resumen y clasificacion de estado.
+- Un proveedor `LLM` configurable como backend remoto de generacion, resumen y clasificacion de estado.
 - `mem0` para memoria duradera filtrada.
 - `Qdrant` como vector store para el nodo RAG, con modo de simulacion habilitado por defecto.
 - Configuracion local estatica para servicios, horarios, doctores y politicas, cargada solo cuando la rama de RAG o cita la necesita.
@@ -34,12 +34,15 @@ cp .env.example .env
 
 4. Ajustar `config/clinic.json` con los datos reales de la clinica. Ese archivo alimenta el contexto de RAG y la extraccion de intencion de cita, no el router ni la conversacion general.
 
-5. Exportar credenciales de OpenAI en tu entorno:
+5. Exportar la configuracion del proveedor LLM en tu entorno:
 
 ```bash
-export OPENAI_API_KEY="..."
-export OPENAI_MODEL="gpt-5-mini"
+export LLM_PROVIDER="openai_compatible"
+export LLM_API_KEY="..."
+export LLM_MODEL="gpt-5-mini"
 ```
+
+Si usas un endpoint compatible con OpenAI, tambien puedes definir `LLM_BASE_URL`.
 6. Ejecutar la API:
 
 ```bash

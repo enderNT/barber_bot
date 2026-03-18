@@ -104,7 +104,7 @@ def build_webhook(message: str, conversation_id: int = 123) -> ChatwootWebhook:
 
 def build_workflow():
     llm = FakeLLMService()
-    router = StateRoutingService(Settings(openai_api_key=None), llm)
+    router = StateRoutingService(Settings(llm_api_key=None, openai_api_key=None), llm)
     memory = FakeMemoryStore()
     qdrant = FakeQdrantService()
     workflow = ClinicWorkflow(

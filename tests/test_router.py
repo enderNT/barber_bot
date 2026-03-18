@@ -23,7 +23,7 @@ class FakeLLMService:
 
 
 def build_service(decision: StateRoutingDecision | None = None) -> StateRoutingService:
-    return StateRoutingService(Settings(openai_api_key=None), FakeLLMService(decision))
+    return StateRoutingService(Settings(llm_api_key=None, openai_api_key=None), FakeLLMService(decision))
 
 
 @pytest.mark.asyncio

@@ -45,7 +45,7 @@ _STEP_LABELS = {
     "appointment_payload": "Revisando datos de la cita",
     "store_memory": "Guardando en memoria",
     "outbound_response": "Enviando respuesta a Chatwoot",
-    "openai_chat_completion": "Consultando OpenAI",
+    "llm_chat_completion": "Consultando proveedor LLM",
     "conversation_prompt_compose": "Preparando respuesta general",
     "conversation_fallback": "Usando respuesta general de respaldo",
     "rag_prompt_compose": "Preparando respuesta con contexto",

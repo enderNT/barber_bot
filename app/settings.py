@@ -14,6 +14,13 @@ class Settings(BaseSettings):
     app_port: int = 8000
     log_level: str = "INFO"
 
+    llm_provider: str = "openai_compatible"
+    llm_api_key: str | None = None
+    llm_base_url: str | None = None
+    llm_model: str | None = None
+    llm_timeout_seconds: int | None = None
+    llm_temperature: float | None = None
+
     openai_api_key: str | None = None
     openai_base_url: str | None = None
     openai_model: str = "gpt-5"
@@ -46,6 +53,32 @@ class Settings(BaseSettings):
     chatwoot_api_base_url: str | None = None
     chatwoot_api_token: str | None = None
     chatwoot_account_id: str | None = None
+
+    @property
+    def resolved_llm_provider(self) -> str:
+        return self.llm_provider.strip().lower()
+
+    @property
+    def resolved_llm_api_key(self) -> str | None:
+        return self.llm_api_key or self.openai_api_key
+
+    @property
+    def resolved_llm_base_url(self) -> str | None:
+        return self.llm_base_url or self.openai_base_url
+
+    @property
+    def resolved_llm_model(self) -> str:
+        return (self.llm_model or self.openai_model).strip()
+
+    @property
+    def resolved_llm_timeout_seconds(self) -> int:
+        return self.llm_timeout_seconds or self.openai_timeout_seconds
+
+    @property
+    def resolved_llm_temperature(self) -> float | None:
+        if self.llm_temperature is not None:
+            return self.llm_temperature
+        return self.openai_temperature
 
 
 @lru_cache

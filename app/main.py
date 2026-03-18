@@ -9,7 +9,7 @@ from app.observability.flow_logger import configure_flow_logger
 from app.services.agent import ClinicAgentService
 from app.services.chatwoot import ChatwootClient
 from app.services.clinic_config import ClinicConfigLoader
-from app.services.llm import ClinicLLMService, OpenAIClient
+from app.services.llm import ClinicLLMService, build_llm_provider
 from app.services.memory import build_memory_store
 from app.services.router import StateRoutingService
 from app.services.qdrant import QdrantRetrievalService
@@ -27,8 +27,8 @@ def create_app() -> FastAPI:
     configure_flow_logger(getattr(logging, settings.log_level.upper(), logging.INFO))
 
     clinic_config_loader = ClinicConfigLoader(settings.clinic_config_path)
-    openai_client = OpenAIClient(settings)
-    llm_service = ClinicLLMService(openai_client)
+    llm_provider = build_llm_provider(settings)
+    llm_service = ClinicLLMService(llm_provider)
     router_service = StateRoutingService(settings, llm_service)
     memory_store = build_memory_store(settings)
     qdrant_service = QdrantRetrievalService(settings)
