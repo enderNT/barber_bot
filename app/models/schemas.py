@@ -56,6 +56,7 @@ class ChatwootWebhook(BaseModel):
     event: str | None = None
     content: str | None = None
     message_type: str | None = None
+    account: dict[str, Any] = Field(default_factory=dict)
     conversation: dict[str, Any] = Field(default_factory=dict)
     contact: dict[str, Any] = Field(default_factory=dict)
     sender: dict[str, Any] = Field(default_factory=dict)
@@ -68,6 +69,24 @@ class ChatwootWebhook(BaseModel):
     def conversation_id(self) -> str:
         raw = self.conversation.get("id") or self.additional_attributes.get("conversation_id") or "unknown-conversation"
         return str(raw)
+
+    @property
+    def account_id(self) -> str | None:
+        raw = (
+            self.account.get("id")
+            or self.conversation.get("account_id")
+            or self.additional_attributes.get("account_id")
+            or self.meta.get("account", {}).get("id")
+            or next(
+                (
+                    message.get("account_id")
+                    for message in reversed(self.messages)
+                    if message.get("account_id")
+                ),
+                None,
+            )
+        )
+        return str(raw) if raw is not None else None
 
     @property
     def contact_id(self) -> str:

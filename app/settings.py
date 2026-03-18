@@ -16,7 +16,7 @@ class Settings(BaseSettings):
 
     openai_api_key: str | None = None
     openai_base_url: str | None = None
-    openai_model: str = "gpt-5-mini"
+    openai_model: str = "gpt-5"
     openai_embedding_model: str = "text-embedding-3-small"
     openai_timeout_seconds: int = 30
     openai_temperature: float = 0.1
@@ -42,6 +42,7 @@ class Settings(BaseSettings):
     chatwoot_reply_enabled: bool = False
     chatwoot_api_base_url: str | None = None
     chatwoot_api_token: str | None = None
+    chatwoot_account_id: str | None = None
 
 
 @lru_cache

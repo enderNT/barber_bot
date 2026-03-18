@@ -24,13 +24,31 @@ class OpenAIClient:
         self._model = settings.openai_model
         self._temperature = settings.openai_temperature
 
+    def _chat_request_kwargs(
+        self, messages: list[dict[str, str]], temperature: float | None = None
+    ) -> dict[str, Any]:
+        request_kwargs: dict[str, Any] = {
+            "model": self._model,
+            "messages": messages,
+        }
+        selected_temperature = self._temperature if temperature is None else temperature
+        if selected_temperature is not None and self._model_supports_temperature():
+            request_kwargs["temperature"] = selected_temperature
+        return request_kwargs
+
+    def _model_supports_temperature(self) -> bool:
+        normalized_model = self._model.strip().lower()
+        unsupported_models = {"gpt-5"}
+        unsupported_prefixes = ("gpt-5-mini", "gpt-5-nano", "gpt-5-")
+        return normalized_model not in unsupported_models and not normalized_model.startswith(
+            unsupported_prefixes
+        )
+
     async def chat_text(self, messages: list[dict[str, str]], temperature: float | None = None) -> str:
         step("2.2.1 openai_chat_completion", "RUN", f"model={self._model}")
         try:
             response = await self._client.chat.completions.create(
-                model=self._model,
-                messages=messages,
-                temperature=self._temperature if temperature is None else temperature,
+                **self._chat_request_kwargs(messages=messages, temperature=temperature),
             )
             content = (response.choices[0].message.content or "").strip()
             step("2.2.1 openai_chat_completion", "OK", f"response_chars={len(content)}")
@@ -42,12 +60,11 @@ class OpenAIClient:
     async def chat_json(self, messages: list[dict[str, str]], temperature: float | None = None) -> dict[str, Any]:
         step("2.2.1 openai_chat_completion", "RUN", f"model={self._model} json_mode=True")
         try:
-            response = await self._client.chat.completions.create(
-                model=self._model,
-                messages=messages,
-                temperature=self._temperature if temperature is None else temperature,
-                response_format={"type": "json_object"},
+            request_kwargs = self._chat_request_kwargs(
+                messages=messages, temperature=temperature
             )
+            request_kwargs["response_format"] = {"type": "json_object"}
+            response = await self._client.chat.completions.create(**request_kwargs)
             content = (response.choices[0].message.content or "").strip()
             step("2.2.1 openai_chat_completion", "OK", f"response_chars={len(content)}")
             return _extract_json(content)

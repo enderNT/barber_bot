@@ -1,18 +1,27 @@
 from fastapi.testclient import TestClient
 
 from app.main import create_app
+from app.settings import get_settings
 
 
-def test_healthcheck():
+def build_test_client(monkeypatch) -> TestClient:
+    get_settings.cache_clear()
+    monkeypatch.setenv("OPENAI_API_KEY", "")
     client = TestClient(create_app())
+    get_settings.cache_clear()
+    return client
+
+
+def test_healthcheck(monkeypatch):
+    client = build_test_client(monkeypatch)
     response = client.get("/health")
 
     assert response.status_code == 200
     assert response.json()["status"] == "ok"
 
 
-def test_chatwoot_webhook_accepts_immediately():
-    client = TestClient(create_app())
+def test_chatwoot_webhook_accepts_immediately(monkeypatch):
+    client = build_test_client(monkeypatch)
     payload = {
         "content": "Necesito una cita",
         "conversation": {"id": 321},

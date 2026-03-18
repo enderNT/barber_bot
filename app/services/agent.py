@@ -32,7 +32,11 @@ class ClinicAgentService:
             if response_text:
                 step("4. outbound_response", "RUN", "enviando respuesta a Chatwoot")
                 try:
-                    await self._chatwoot_client.send_message(payload.conversation_id, response_text)
+                    await self._chatwoot_client.send_message(
+                        payload.conversation_id,
+                        response_text,
+                        account_id=payload.account_id,
+                    )
                     step("4. outbound_response", "OK", "respuesta enviada o logueada")
                 except Exception as exc:  # pragma: no cover - depende de Chatwoot
                     mark_error("4. outbound_response", exc)
