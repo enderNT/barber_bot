@@ -7,7 +7,7 @@ from typing import Any, Literal, Protocol, TypedDict
 
 from openai import AsyncOpenAI
 
-from app.models.schemas import AppointmentIntentPayload, RoutingPacket, StateRoutingDecision
+from app.models.schemas import BookingIntentPayload, RoutingPacket, StateRoutingDecision
 from app.observability.flow_logger import mark_error, step, substep
 from app.settings import Settings
 
@@ -140,14 +140,14 @@ def build_llm_provider(settings: Settings) -> LLMProvider:
     raise ValueError(f"Unsupported llm provider: {provider_name}")
 
 
-class ClinicLLMService:
+class BarbershopLLMService:
     def __init__(self, provider: LLMProvider) -> None:
         self._provider = provider
 
     async def build_conversation_reply(self, user_message: str, memories: list[str]) -> str:
         system_prompt = (
-            "Eres un asistente de una clinica. Responde de forma breve, clara y natural. "
-            "Ayuda con la conversacion general y solo canaliza con recepcion si falta un dato."
+            "Eres un asistente de una barberia. Responde de forma breve, clara y natural. "
+            "Ayuda con conversacion general, servicios y citas. Si falta un dato operativo, canaliza con recepcion."
         )
         user_prompt = (
             f"Memorias relevantes: {memories}\n"
@@ -166,17 +166,17 @@ class ClinicLLMService:
             logger.warning("LLM conversation failed, using deterministic fallback: %s", exc)
             substep("conversation_fallback", "WARN", "mensaje deterministico")
             return (
-                "Puedo ayudarte con informacion general de la clinica y con solicitudes de cita. "
+                "Puedo ayudarte con informacion general de la barberia y con solicitudes de cita. "
                 "Si tu pregunta depende de un dato no disponible, la canalizo con recepcion."
             )
 
-    async def build_rag_reply(self, user_message: str, memories: list[str], clinic_context: str) -> str:
+    async def build_rag_reply(self, user_message: str, memories: list[str], barbershop_context: str) -> str:
         system_prompt = (
-            "Eres un asistente clinico en modo RAG. Usa solo el contexto entregado y no inventes informacion. "
+            "Eres un asistente de barberia en modo RAG. Usa solo el contexto entregado y no inventes informacion. "
             "Si falta informacion, dilo claramente y escala con recepcion."
         )
         user_prompt = (
-            f"Contexto recuperado:\n{clinic_context}\n"
+            f"Contexto recuperado:\n{barbershop_context}\n"
             f"Memoria conversacional: {memories}\n"
             f"Pregunta: {user_message}\n"
             "Responde breve y accionable en espanol."
@@ -193,7 +193,7 @@ class ClinicLLMService:
             logger.warning("LLM rag failed, using deterministic fallback: %s", exc)
             substep("rag_fallback", "WARN", "RAG degradado a respuesta segura")
             return (
-                "Puedo responder con la informacion disponible de la clinica. "
+                "Puedo responder con la informacion disponible de la barberia. "
                 "Si necesitas un dato que no aparece en el contexto actual, lo canalizo con recepcion."
             )
 
@@ -245,9 +245,9 @@ class ClinicLLMService:
         guard_hint: dict[str, Any] | None = None,
     ) -> StateRoutingDecision:
         system_prompt = (
-            "Eres un clasificador de estado para un asistente de clinica. "
+            "Eres un clasificador de estado para un asistente de barberia. "
             "Debes devolver JSON estricto con next_node, intent, confidence, needs_retrieval, state_update y reason. "
-            "Los valores permitidos para next_node son conversation, rag, appointment. "
+            "Los valores permitidos para next_node son conversation, rag, booking. "
             "Usa guards y el estado para decidir continuidad conversacional."
         )
         user_prompt = json.dumps(
@@ -279,83 +279,93 @@ class ClinicLLMService:
             substep("state_router_fallback", "WARN", "clasificador degradado")
             return self._fallback_state_route(routing_packet, guard_hint or {})
 
-    async def extract_appointment_intent(
+    async def extract_booking_intent(
         self,
         user_message: str,
         memories: list[str],
-        clinic_context: str,
+        barbershop_context: str,
         contact_name: str,
-        current_slots: dict[str, Any] | None = None,
+        current_details: dict[str, Any] | None = None,
         pending_question: str | None = None,
-    ) -> tuple[AppointmentIntentPayload, str]:
+    ) -> tuple[BookingIntentPayload, str]:
         system_prompt = (
-            "Extrae intencion de cita. Devuelve JSON estricto con llaves: "
-            "patient_name, reason, preferred_date, preferred_time, missing_fields, should_handoff, confidence."
+            "Extrae intencion de cita para barberia. Devuelve JSON estricto con llaves: "
+            "client_name, service, preferred_date, preferred_time, missing_fields, should_handoff, confidence. "
+            "Solo pide esos cuatro campos."
         )
         user_prompt = (
             f"Nombre de contacto: {contact_name}\n"
             f"Memorias relevantes: {memories}\n"
-            f"Slots actuales: {current_slots or {}}\n"
+            f"Datos actuales: {current_details or {}}\n"
             f"Pendiente: {pending_question or 'n/a'}\n"
-            f"Contexto clinico:\n{clinic_context}\n"
+            f"Contexto de la barberia:\n{barbershop_context}\n"
             f"Mensaje: {user_message}\n"
             "Si faltan datos, listalos en missing_fields."
         )
         try:
-            substep("appointment_prompt_compose", "OK", f"msg_chars={len(user_message)} memories={len(memories)}")
+            substep("booking_prompt_compose", "OK", f"msg_chars={len(user_message)} memories={len(memories)}")
             payload = await self._provider.chat_json(
                 [
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": user_prompt},
                 ]
             )
-            appointment = AppointmentIntentPayload.model_validate(payload)
-            substep("appointment_json_parse", "OK")
+            booking = BookingIntentPayload.model_validate(payload)
+            substep("booking_json_parse", "OK")
         except Exception as exc:
-            logger.warning("LLM appointment extraction failed, using heuristic fallback: %s", exc)
-            substep("appointment_fallback", "WARN", "extraccion heuristica")
-            appointment = self._fallback_appointment(
+            logger.warning("LLM booking extraction failed, using heuristic fallback: %s", exc)
+            substep("booking_fallback", "WARN", "extraccion heuristica")
+            booking = self._fallback_booking(
                 user_message,
                 contact_name,
-                current_slots=current_slots or {},
+                current_details=current_details or {},
             )
-        reply = self._build_appointment_reply(appointment)
-        return appointment, reply
+        reply = self._build_booking_reply(booking)
+        return booking, reply
 
-    def _fallback_appointment(
-        self, user_message: str, contact_name: str, current_slots: dict[str, Any] | None = None
-    ) -> AppointmentIntentPayload:
-        current_slots = current_slots or {}
+    def _fallback_booking(
+        self, user_message: str, contact_name: str, current_details: dict[str, Any] | None = None
+    ) -> BookingIntentPayload:
+        current_details = current_details or {}
         lowered = user_message.lower()
-        reason = None
-        for specialty in ("pediatria", "medicina general", "dermatologia", "ginecologia", "cardiologia"):
-            if specialty in lowered:
-                reason = specialty
+        service = None
+        for known_service in (
+            "corte y barba",
+            "afeitado",
+            "afeitado tradicional",
+            "barba",
+            "fade",
+            "corte clasico",
+            "corte",
+            "paquete",
+        ):
+            if known_service in lowered:
+                service = known_service
                 break
         date_match = re.search(
-            r"\b(\d{1,2}/\d{1,2}/\d{2,4}|manana|hoy|lunes|martes|miercoles|jueves|viernes|sabado)\b",
+            r"\b(\d{1,2}/\d{1,2}/\d{2,4}|mañana|manana|hoy|lunes|martes|miercoles|miércoles|jueves|viernes|sabado|sábado)\b",
             lowered,
         )
         time_match = re.search(r"\b(\d{1,2}:\d{2}\s?(?:am|pm)?|\d{1,2}\s?(?:am|pm))\b", lowered)
-        patient_name = (
-            current_slots.get("patient_name")
-            or (contact_name if contact_name and contact_name != "Paciente" else None)
+        client_name = (
+            current_details.get("client_name")
+            or (contact_name if contact_name and contact_name != "Cliente" else None)
         )
-        reason = current_slots.get("reason") or reason
-        preferred_date = current_slots.get("preferred_date") or (date_match.group(1) if date_match else None)
-        preferred_time = current_slots.get("preferred_time") or (time_match.group(1) if time_match else None)
+        service = current_details.get("service") or service
+        preferred_date = current_details.get("preferred_date") or (date_match.group(1) if date_match else None)
+        preferred_time = current_details.get("preferred_time") or (time_match.group(1) if time_match else None)
         missing_fields = []
-        if not patient_name:
-            missing_fields.append("patient_name")
-        if not reason:
-            missing_fields.append("reason")
+        if not client_name:
+            missing_fields.append("client_name")
+        if not service:
+            missing_fields.append("service")
         if not preferred_date:
             missing_fields.append("preferred_date")
         if not preferred_time:
             missing_fields.append("preferred_time")
-        return AppointmentIntentPayload(
-            patient_name=patient_name,
-            reason=reason,
+        return BookingIntentPayload(
+            client_name=client_name,
+            service=service,
             preferred_date=preferred_date,
             preferred_time=preferred_time,
             missing_fields=missing_fields,
@@ -363,15 +373,15 @@ class ClinicLLMService:
             confidence=0.65,
         )
 
-    def _build_appointment_reply(self, appointment: AppointmentIntentPayload) -> str:
-        if appointment.missing_fields:
+    def _build_booking_reply(self, booking: BookingIntentPayload) -> str:
+        if booking.missing_fields:
             field_names = {
-                "patient_name": "nombre del paciente",
-                "reason": "motivo o especialidad",
+                "client_name": "nombre del cliente",
+                "service": "servicio",
                 "preferred_date": "fecha preferida",
                 "preferred_time": "hora preferida",
             }
-            missing = ", ".join(field_names.get(field, field) for field in appointment.missing_fields)
+            missing = ", ".join(field_names.get(field, field) for field in booking.missing_fields)
             return (
                 "Puedo dejar lista tu solicitud de cita. "
                 f"Para continuar necesito: {missing}. "
@@ -379,17 +389,17 @@ class ClinicLLMService:
             )
         return (
             "Ya tengo lo necesario para preparar tu solicitud de cita. "
-            "La pasare a recepcion con el motivo y la preferencia de fecha/hora para confirmacion."
+            "La pasare a recepcion con el servicio y la preferencia de fecha/hora para confirmacion."
         )
 
     def _fallback_state_route(
         self, routing_packet: RoutingPacket, guard_hint: dict[str, Any]
     ) -> StateRoutingDecision:
         user_message = routing_packet.user_message.lower()
-        if guard_hint.get("force_node") == "appointment":
+        if guard_hint.get("force_node") == "booking":
             return StateRoutingDecision(
-                next_node="appointment",
-                intent="appointment",
+                next_node="booking",
+                intent="booking",
                 confidence=0.88,
                 needs_retrieval=False,
                 state_update=guard_hint.get("state_update", {}),
@@ -404,16 +414,34 @@ class ClinicLLMService:
                 state_update=guard_hint.get("state_update", {}),
                 reason="guard-hint",
             )
-        if any(word in user_message for word in ("cita", "agendar", "reservar", "consulta", "turno")):
+        if any(
+            word in user_message
+            for word in ("cita", "agendar", "reservar", "turno", "corte", "barba", "afeitado", "fade", "paquete")
+        ):
             return StateRoutingDecision(
-                next_node="appointment",
-                intent="appointment",
+                next_node="booking",
+                intent="booking",
                 confidence=0.74,
                 needs_retrieval=False,
-                state_update={"active_goal": "appointment", "stage": "collecting_slots"},
+                state_update={"active_goal": "booking", "stage": "collecting_booking_details"},
                 reason="heuristic-fallback",
             )
-        if any(word in user_message for word in ("horario", "precio", "costo", "servicio", "doctor", "especialidad")):
+        if any(
+            word in user_message
+            for word in (
+                "horario",
+                "precio",
+                "costo",
+                "servicio",
+                "servicios",
+                "barbero",
+                "barberos",
+                "ubicacion",
+                "ubicación",
+                "pago",
+                "pagos",
+            )
+        ):
             return StateRoutingDecision(
                 next_node="rag",
                 intent="rag",

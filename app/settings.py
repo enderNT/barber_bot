@@ -33,18 +33,19 @@ class Settings(BaseSettings):
     summary_refresh_char_threshold: int = 900
     memory_search_limit: int = 3
 
-    clinic_config_path: Path = Field(default=Path("config/clinic.json"))
+    barbershop_config_path: Path = Field(default=Path("config/barbershop.json"))
 
-    memory_backend: Literal["in_memory", "mem0_local", "mem0_platform"] = "in_memory"
-    mem0_api_key: str | None = None
-    mem0_org_id: str | None = None
-    mem0_project_id: str | None = None
+    memory_backend: Literal["in_memory", "postgres"] = "in_memory"
+    checkpoint_backend: Literal["memory", "postgres"] = "postgres"
+    postgres_dsn: str | None = None
+    memory_embedding_model: str = "text-embedding-3-small"
+    memory_embedding_dims: int = 1536
 
     qdrant_enabled: bool = False
     qdrant_simulate: bool = True
     qdrant_base_url: str | None = None
     qdrant_api_key: str | None = None
-    qdrant_collection_name: str = "clinic_knowledge"
+    qdrant_collection_name: str = "barbershop_knowledge"
     qdrant_timeout_seconds: int = 10
     qdrant_top_k: int = 5
     qdrant_vector_size: int = 8

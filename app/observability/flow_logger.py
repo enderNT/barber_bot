@@ -6,7 +6,7 @@ import re
 import time
 import uuid
 
-logger = logging.getLogger("clinica.flow")
+logger = logging.getLogger("barbershop.flow")
 
 _flow_id_var: contextvars.ContextVar[str] = contextvars.ContextVar("flow_id", default="-")
 _conversation_id_var: contextvars.ContextVar[str] = contextvars.ContextVar("conversation_id", default="-")
@@ -28,7 +28,7 @@ _STEP_LABELS = {
     "webhook_background_dispatch": "Enviando a segundo plano",
     "semantic_routing_and_graph": "Procesando flujo principal",
     "build_context": "Preparando contexto",
-    "clinic_config": "Cargando configuracion de la clinica",
+    "barbershop_config": "Cargando configuracion de la barberia",
     "mem0_lookup": "Buscando memoria previa",
     "qdrant_lookup": "Consultando contexto RAG",
     "intent_router_openai": "Decidiendo intencion",
@@ -38,11 +38,11 @@ _STEP_LABELS = {
     "branch_selection": "Eligiendo camino del flujo",
     "conversation": "Yendo a conversacion general",
     "rag": "Yendo a respuesta con contexto",
-    "appointment": "Yendo a gestion de cita",
+    "booking": "Yendo a gestion de cita",
     "conversation_node": "Generando respuesta general",
     "rag_node": "Generando respuesta con contexto",
-    "appointment_node": "Extrayendo datos de la cita",
-    "appointment_payload": "Revisando datos de la cita",
+    "booking_node": "Extrayendo datos de la cita",
+    "booking_payload": "Revisando datos de la cita",
     "store_memory": "Guardando en memoria",
     "outbound_response": "Enviando respuesta a Chatwoot",
     "llm_chat_completion": "Consultando proveedor LLM",
@@ -51,9 +51,9 @@ _STEP_LABELS = {
     "conversation_fallback": "Usando respuesta general de respaldo",
     "rag_prompt_compose": "Preparando respuesta con contexto",
     "rag_fallback": "Usando respuesta RAG de respaldo",
-    "appointment_prompt_compose": "Preparando extraccion de cita",
-    "appointment_json_parse": "Leyendo datos estructurados",
-    "appointment_fallback": "Usando extraccion de respaldo",
+    "booking_prompt_compose": "Preparando extraccion de cita",
+    "booking_json_parse": "Leyendo datos estructurados",
+    "booking_fallback": "Usando extraccion de respaldo",
     "flow_execution": "Ejecucion del flujo",
     "unknown_branch": "Ruta desconocida",
 }

@@ -1,71 +1,77 @@
 import asyncio
+from datetime import UTC, datetime
+from types import SimpleNamespace
 
-from app.services.memory import (
-    Mem0LocalMemoryStore,
-    Mem0PlatformMemoryStore,
-    _normalize_mem0_search_results,
-    should_store_memory,
-)
+import pytest
+
+from app.services.memory import PostgresMemoryStore, build_memory_store, should_store_memory
+from app.settings import Settings
 
 
-def test_normalize_mem0_search_results_accepts_v2_dict_shape():
-    results = {
-        "results": [
-            {"memory": "Paciente prefiere horario matutino"},
-            {"memory": "Tiene seguro activo"},
-            {"text": "Dato alternativo"},
-        ]
-    }
+class FakeAsyncStore:
+    def __init__(self):
+        self.put_calls = []
+        self.search_results = []
 
-    normalized = _normalize_mem0_search_results(results, limit=2)
+    async def aput(self, namespace, key, value, index=None):
+        self.put_calls.append((namespace, key, value, index))
 
-    assert normalized == [
-        "Paciente prefiere horario matutino",
-        "Tiene seguro activo",
+    async def asearch(self, namespace_prefix, query=None, limit=10):
+        assert namespace_prefix == ("memories", "456")
+        assert query == "dolor de cabeza"
+        assert limit == 3
+        return self.search_results
+
+
+def test_postgres_memory_store_search_returns_text_snippets():
+    store_backend = FakeAsyncStore()
+    store_backend.search_results = [
+        SimpleNamespace(value={"text": "Antecedente A"}),
+        SimpleNamespace(value={"text": "Antecedente B"}),
+        SimpleNamespace(value={"kind": "profile"}),
     ]
-
-
-def test_normalize_mem0_search_results_accepts_list_shape():
-    results = [
-        {"memory": "Primera memoria"},
-        {"memory": "Segunda memoria"},
-    ]
-
-    normalized = _normalize_mem0_search_results(results, limit=5)
-
-    assert normalized == ["Primera memoria", "Segunda memoria"]
-
-
-def test_mem0_local_search_normalizes_dict_results():
-    class FakeLocalClient:
-        def search(self, query, filters, limit):
-            assert query == "dolor de cabeza"
-            assert filters == {"user_id": "456"}
-            assert limit == 3
-            return {"results": [{"memory": "Antecedente A"}, {"memory": "Antecedente B"}]}
-
-    store = object.__new__(Mem0LocalMemoryStore)
-    store._client = FakeLocalClient()
+    store = PostgresMemoryStore(store_backend)
 
     memories = asyncio.run(store.search("456", "dolor de cabeza", limit=3))
 
     assert memories == ["Antecedente A", "Antecedente B"]
 
 
-def test_mem0_platform_search_normalizes_dict_results():
-    class FakePlatformClient:
-        def search(self, query, filters, top_k):
-            assert query == "agendar cita"
-            assert filters == {"user_id": "789"}
-            assert top_k == 2
-            return {"results": [{"memory": "Prefiere WhatsApp"}, {"memory": "No disponible por la tarde"}]}
+def test_postgres_memory_store_persists_expected_payload_shape():
+    store_backend = FakeAsyncStore()
+    store = PostgresMemoryStore(store_backend)
+    memories = should_store_memory(
+        "Quiero cita para corte y barba manana",
+        "Perfecto, lo paso a recepcion",
+        "booking",
+        {
+            "booking_details": {
+                "client_name": "Juan Perez",
+                "service": "corte y barba",
+                "preferred_date": "manana",
+                "preferred_time": "10 am",
+            }
+        },
+    )
 
-    store = object.__new__(Mem0PlatformMemoryStore)
-    store._client = FakePlatformClient()
+    asyncio.run(store.save_memories("456", memories))
 
-    memories = asyncio.run(store.search("789", "agendar cita", limit=2))
+    assert len(store_backend.put_calls) == 1
+    namespace, key, value, index = store_backend.put_calls[0]
+    assert namespace == ("memories", "456")
+    assert key
+    assert value["kind"] == "profile"
+    assert value["source"] == "stateful-flow"
+    assert value["text"].startswith("Preferencias de cita en barberia:")
+    assert datetime.fromisoformat(value["created_at"]).tzinfo == UTC
+    assert index == ["text"]
 
-    assert memories == ["Prefiere WhatsApp", "No disponible por la tarde"]
+
+def test_build_memory_store_requires_backend_when_postgres_is_enabled():
+    settings = Settings(memory_backend="postgres")
+
+    with pytest.raises(ValueError, match="configured LangGraph store"):
+        build_memory_store(settings)
 
 
 def test_should_store_memory_skips_trivial_turns():
@@ -74,15 +80,15 @@ def test_should_store_memory_skips_trivial_turns():
     assert memories == []
 
 
-def test_should_store_memory_persists_appointment_facts():
+def test_should_store_memory_persists_booking_facts():
     memories = should_store_memory(
-        "Quiero cita con dermatologia manana",
+        "Quiero cita para corte y barba manana",
         "Perfecto, lo paso a recepcion",
-        "appointment",
+        "booking",
         {
-            "appointment_slots": {
-                "patient_name": "Juan Perez",
-                "reason": "dermatologia",
+            "booking_details": {
+                "client_name": "Juan Perez",
+                "service": "corte y barba",
                 "preferred_date": "manana",
                 "preferred_time": "10 am",
             }

@@ -40,11 +40,11 @@ class QdrantRetrievalService:
             return self._simulate_search(query=query, contact_id=contact_id, limit=top_k)
         return await self._http_search(query=query, contact_id=contact_id, limit=top_k)
 
-    async def build_context(self, query: str, contact_id: str, clinic_context: str, memories: list[str]) -> str:
+    async def build_context(self, query: str, contact_id: str, barbershop_context: str, memories: list[str]) -> str:
         results = await self.search(query=query, contact_id=contact_id)
         chunks = [
-            "Contexto base de la clinica:",
-            clinic_context,
+            "Contexto base de la barberia:",
+            barbershop_context,
             "",
             "Memoria conversacional:",
             "\n".join(f"- {item}" for item in memories) if memories else "- Sin memorias",

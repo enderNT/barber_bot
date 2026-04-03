@@ -6,14 +6,14 @@ from typing import Any
 
 from app.models.schemas import RoutingPacket, StateRoutingDecision
 from app.observability.flow_logger import substep
-from app.services.llm import ClinicLLMService
+from app.services.llm import BarbershopLLMService
 from app.settings import Settings
 
 logger = logging.getLogger(__name__)
 
 
 class StateRoutingService:
-    def __init__(self, settings: Settings, llm_service: ClinicLLMService) -> None:
+    def __init__(self, settings: Settings, llm_service: BarbershopLLMService) -> None:
         self._settings = settings
         self._llm_service = llm_service
 
@@ -26,7 +26,7 @@ class StateRoutingService:
         stage: str,
         pending_action: str,
         pending_question: str,
-        appointment_slots: dict[str, Any],
+        booking_details: dict[str, Any],
         last_tool_result: str,
         last_user_message: str,
         last_assistant_message: str,
@@ -39,7 +39,7 @@ class StateRoutingService:
             stage=_compact_text(stage, 80),
             pending_action=_compact_text(pending_action, 120),
             pending_question=_compact_text(pending_question, 200),
-            appointment_slots={key: _compact_text(str(value), 120) for key, value in appointment_slots.items()},
+            booking_details={key: _compact_text(str(value), 120) for key, value in booking_details.items()},
             last_tool_result=_compact_text(last_tool_result, 280),
             last_user_message=_compact_text(last_user_message, 280),
             last_assistant_message=_compact_text(last_assistant_message, 280),
@@ -80,32 +80,32 @@ class StateRoutingService:
                 reason="empty-message",
             )
 
-        if self._appointment_follow_up(routing_packet, user_message):
+        if self._booking_follow_up(routing_packet, user_message):
             return StateRoutingDecision(
-                next_node="appointment",
-                intent="appointment",
+                next_node="booking",
+                intent="booking",
                 confidence=0.95,
                 needs_retrieval=False,
                 state_update={
-                    "active_goal": "appointment",
-                    "stage": "collecting_slots",
-                    "pending_action": "collecting_slots",
+                    "active_goal": "booking",
+                    "stage": "collecting_booking_details",
+                    "pending_action": "collecting_booking_details",
                 },
-                reason="appointment-follow-up",
+                reason="booking-follow-up",
             )
 
-        if self._explicit_appointment_request(user_message):
+        if self._explicit_booking_request(user_message):
             return StateRoutingDecision(
-                next_node="appointment",
-                intent="appointment",
+                next_node="booking",
+                intent="booking",
                 confidence=0.92,
                 needs_retrieval=False,
                 state_update={
-                    "active_goal": "appointment",
-                    "stage": "collecting_slots",
-                    "pending_action": "collecting_slots",
+                    "active_goal": "booking",
+                    "stage": "collecting_booking_details",
+                    "pending_action": "collecting_booking_details",
                 },
-                reason="appointment-request",
+                reason="booking-request",
             )
 
         if self._explicit_rag_request(user_message):
@@ -136,37 +136,39 @@ class StateRoutingService:
 
         return None
 
-    def _appointment_follow_up(self, routing_packet: RoutingPacket, user_message: str) -> bool:
-        active_appointment = routing_packet.active_goal == "appointment" or routing_packet.stage in {
-            "collecting_slots",
+    def _booking_follow_up(self, routing_packet: RoutingPacket, user_message: str) -> bool:
+        active_booking = routing_packet.active_goal == "booking" or routing_packet.stage in {
+            "collecting_booking_details",
             "ready_for_handoff",
         }
-        if not active_appointment:
+        if not active_booking:
             return False
         if routing_packet.pending_question:
             return True
-        if routing_packet.appointment_slots and len(user_message) <= 40:
+        if routing_packet.booking_details and len(user_message) <= 40:
             return True
         return bool(
             re.search(
-                r"\b(si|sí|no|claro|mañana|manana|hoy|tarde|noche|am|pm|\d{1,2}:\d{2}|\d{1,2}\s?am|\d{1,2}\s?pm)\b",
+                r"\b(si|sí|no|claro|mañana|manana|hoy|tarde|noche|am|pm|con|barba|corte|fade|\d{1,2}:\d{2}|\d{1,2}\s?am|\d{1,2}\s?pm)\b",
                 user_message,
             )
         )
 
-    def _explicit_appointment_request(self, user_message: str) -> bool:
-        appointment_keywords = (
+    def _explicit_booking_request(self, user_message: str) -> bool:
+        booking_keywords = (
             "cita",
             "agendar",
             "agendo",
             "reservar",
-            "consulta",
             "turno",
-            "doctor",
-            "doctora",
-            "programar una visita",
+            "corte",
+            "barba",
+            "afeitado",
+            "fade",
+            "barbero",
+            "paquete",
         )
-        return any(keyword in user_message for keyword in appointment_keywords)
+        return any(keyword in user_message for keyword in booking_keywords)
 
     def _explicit_rag_request(self, user_message: str) -> bool:
         rag_keywords = (
@@ -177,12 +179,11 @@ class StateRoutingService:
             "costos",
             "servicio",
             "servicios",
-            "doctor",
-            "doctores",
-            "especialidad",
-            "especialidades",
+            "barbero",
+            "barberos",
             "direccion",
             "ubicacion",
+            "ubicación",
             "ubicados",
             "política",
             "politica",

@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from app.graph.workflow import ClinicWorkflow
+from app.graph.workflow import BarbershopWorkflow
 from app.models.schemas import ChatwootWebhook
 from app.observability.flow_logger import bind_flow, clear_flow, end_flow, mark_error, start_flow, step, substep
 from app.services.chatwoot import ChatwootClient
@@ -11,8 +11,8 @@ from app.services.chatwoot import ChatwootClient
 logger = logging.getLogger(__name__)
 
 
-class ClinicAgentService:
-    def __init__(self, workflow: ClinicWorkflow, chatwoot_client: ChatwootClient) -> None:
+class BarbershopAgentService:
+    def __init__(self, workflow: BarbershopWorkflow, chatwoot_client: ChatwootClient) -> None:
         self._workflow = workflow
         self._chatwoot_client = chatwoot_client
 

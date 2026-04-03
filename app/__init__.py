@@ -1,1 +1,1 @@
-"""Clinica assistant application package."""
+"""Barbershop assistant application package."""

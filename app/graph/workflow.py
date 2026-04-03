@@ -9,8 +9,8 @@ from langgraph.graph import END, START, StateGraph
 
 from app.models.schemas import ChatwootWebhook
 from app.observability.flow_logger import mark_error, step, substep
-from app.services.clinic_config import ClinicConfigLoader
-from app.services.llm import ClinicLLMService
+from app.services.barbershop_config import BarbershopConfigLoader
+from app.services.llm import BarbershopLLMService
 from app.services.memory import MemoryStore, should_store_memory
 from app.services.qdrant import QdrantRetrievalService
 from app.services.router import StateRoutingService
@@ -30,7 +30,7 @@ class GraphState(TypedDict, total=False):
     stage: str
     pending_action: str
     pending_question: str
-    appointment_slots: dict[str, Any]
+    booking_details: dict[str, Any]
     last_tool_result: str
     memories: list[str]
     next_node: str
@@ -40,28 +40,32 @@ class GraphState(TypedDict, total=False):
     routing_reason: str
     state_update: dict[str, Any]
     response_text: str
-    appointment_payload: dict[str, Any]
+    booking_payload: dict[str, Any]
     handoff_required: bool
     turn_count: int
     summary_refresh_requested: bool
 
 
-class ClinicWorkflow:
+class BarbershopWorkflow:
     def __init__(
         self,
         router_service: StateRoutingService,
-        llm_service: ClinicLLMService,
+        llm_service: BarbershopLLMService,
         memory_store: MemoryStore,
-        clinic_config_loader: ClinicConfigLoader,
+        barbershop_config_loader: BarbershopConfigLoader,
         qdrant_service: QdrantRetrievalService,
         settings: Settings,
+        checkpointer: Any | None = None,
+        store_backend: Any | None = None,
     ) -> None:
         self._router_service = router_service
         self._llm_service = llm_service
         self._memory_store = memory_store
-        self._clinic_config_loader = clinic_config_loader
+        self._barbershop_config_loader = barbershop_config_loader
         self._qdrant_service = qdrant_service
         self._settings = settings
+        self._checkpointer = checkpointer or MemorySaver()
+        self._store_backend = store_backend
         self._graph = self._build_graph()
 
     def _build_graph(self):
@@ -70,7 +74,7 @@ class ClinicWorkflow:
         graph.add_node("route", self._route)
         graph.add_node("conversation", self._conversation)
         graph.add_node("rag", self._rag)
-        graph.add_node("appointment", self._appointment)
+        graph.add_node("booking", self._booking)
         graph.add_node("finalize_turn", self._finalize_turn)
         graph.add_node("store_memory", self._store_memory)
 
@@ -82,15 +86,18 @@ class ClinicWorkflow:
             {
                 "conversation": "conversation",
                 "rag": "rag",
-                "appointment": "appointment",
+                "booking": "booking",
             },
         )
         graph.add_edge("conversation", "finalize_turn")
         graph.add_edge("rag", "finalize_turn")
-        graph.add_edge("appointment", "finalize_turn")
+        graph.add_edge("booking", "finalize_turn")
         graph.add_edge("finalize_turn", "store_memory")
         graph.add_edge("store_memory", END)
-        return graph.compile(checkpointer=MemorySaver())
+        compile_kwargs: dict[str, Any] = {"checkpointer": self._checkpointer}
+        if self._store_backend is not None:
+            compile_kwargs["store"] = self._store_backend
+        return graph.compile(**compile_kwargs)
 
     async def run(self, webhook: ChatwootWebhook) -> GraphState:
         initial_state: GraphState = {
@@ -131,7 +138,7 @@ class ClinicWorkflow:
                 stage=state.get("stage", ""),
                 pending_action=state.get("pending_action", ""),
                 pending_question=state.get("pending_question", ""),
-                appointment_slots=state.get("appointment_slots", {}),
+                booking_details=state.get("booking_details", {}),
                 last_tool_result=state.get("last_tool_result", ""),
                 last_user_message=state.get("last_user_message", ""),
                 last_assistant_message=state.get("last_assistant_message", ""),
@@ -167,8 +174,8 @@ class ClinicWorkflow:
             substep("3.a conversation", "OK", "usando nodo conversacional")
         elif branch == "rag":
             substep("3.b rag", "OK", "usando nodo RAG")
-        elif branch == "appointment":
-            substep("3.c appointment", "OK", "usando nodo de agendado")
+        elif branch == "booking":
+            substep("3.c booking", "OK", "usando nodo de agendado")
         else:
             substep("3.x unknown_branch", "WARN", f"branch={branch}; fallback a conversation")
             return "conversation"
@@ -187,7 +194,7 @@ class ClinicWorkflow:
                 "last_assistant_message": response_text,
                 "last_tool_result": "",
                 "handoff_required": False,
-                "appointment_payload": {},
+                "booking_payload": {},
             }
         except Exception as exc:
             mark_error("3.a.1 conversation_node", exc)
@@ -196,19 +203,19 @@ class ClinicWorkflow:
     async def _rag(self, state: GraphState) -> GraphState:
         try:
             step("3.b.1 rag_node", "RUN", "consultando contexto RAG")
-            clinic_context = self._clinic_config_loader.load().to_context_text()
-            substep("clinic_config", "OK", "config estatica cargada")
+            barbershop_context = self._barbershop_config_loader.load().to_context_text()
+            substep("barbershop_config", "OK", "config estatica cargada")
             rag_context = await self._qdrant_service.build_context(
                 query=state["last_user_message"] or "contexto del usuario",
                 contact_id=state["contact_id"],
-                clinic_context=clinic_context,
+                barbershop_context=barbershop_context,
                 memories=state.get("memories", []),
             )
             substep("qdrant_lookup", "OK", "contexto vectorial preparado")
             response_text = await self._llm_service.build_rag_reply(
                 user_message=state["last_user_message"],
                 memories=state.get("memories", []),
-                clinic_context=rag_context,
+                barbershop_context=rag_context,
             )
             step("3.b.1 rag_node", "OK", f"chars={len(response_text)}")
             return {
@@ -216,59 +223,55 @@ class ClinicWorkflow:
                 "response_text": response_text,
                 "last_assistant_message": response_text,
                 "handoff_required": False,
-                "appointment_payload": {},
+                "booking_payload": {},
             }
         except Exception as exc:
             mark_error("3.b.1 rag_node", exc)
             raise
 
-    async def _appointment(self, state: GraphState) -> GraphState:
+    async def _booking(self, state: GraphState) -> GraphState:
         try:
-            step("3.c.1 appointment_node", "RUN", "extrayendo datos de cita")
-            clinic_context = self._clinic_config_loader.load().to_context_text()
-            substep("clinic_config", "OK", "config estatica cargada")
-            appointment, response_text = await self._llm_service.extract_appointment_intent(
+            step("3.c.1 booking_node", "RUN", "extrayendo datos de cita")
+            barbershop_context = self._barbershop_config_loader.load().to_context_text()
+            substep("barbershop_config", "OK", "config estatica cargada")
+            booking, response_text = await self._llm_service.extract_booking_intent(
                 user_message=state["last_user_message"],
                 memories=state.get("memories", []),
-                clinic_context=clinic_context,
+                barbershop_context=barbershop_context,
                 contact_name=state["contact_name"],
-                current_slots=state.get("appointment_slots", {}),
+                current_details=state.get("booking_details", {}),
                 pending_question=state.get("pending_question"),
             )
-            appointment_slots = _merge_slots(state.get("appointment_slots", {}), appointment.model_dump())
-            missing_fields = list(appointment.missing_fields)
+            booking_details = _merge_booking_details(state.get("booking_details", {}), booking.model_dump())
+            missing_fields = list(booking.missing_fields)
             pending_question = _build_pending_question(missing_fields) if missing_fields else ""
-            stage = "collecting_slots" if missing_fields else "ready_for_handoff"
-            pending_action = "collecting_slots" if missing_fields else ""
+            stage = "collecting_booking_details" if missing_fields else "ready_for_handoff"
+            pending_action = "collecting_booking_details" if missing_fields else ""
             if not missing_fields:
-                response_text = (
-                    response_text
-                    + " "
-                    + "Tu solicitud quedo lista para recepcion."
-                ).strip()
+                response_text = (response_text + " " + "Tu solicitud quedo lista para recepcion.").strip()
             substep(
-                "appointment_payload",
+                "booking_payload",
                 "OK",
-                f"missing_fields={len(missing_fields)} handoff={appointment.should_handoff}",
+                f"missing_fields={len(missing_fields)} handoff={booking.should_handoff}",
             )
-            step("3.c.1 appointment_node", "OK", f"chars={len(response_text)}")
+            step("3.c.1 booking_node", "OK", f"chars={len(response_text)}")
             return {
                 "response_text": response_text,
                 "last_assistant_message": response_text,
-                "appointment_slots": appointment_slots,
+                "booking_details": booking_details,
                 "pending_question": pending_question,
                 "pending_action": pending_action,
-                "active_goal": "appointment",
+                "active_goal": "booking",
                 "stage": stage,
                 "last_tool_result": _shorten(
-                    f"appointment missing={','.join(missing_fields) or 'none'} confidence={appointment.confidence:.2f}",
+                    f"booking missing={','.join(missing_fields) or 'none'} confidence={booking.confidence:.2f}",
                     200,
                 ),
-                "handoff_required": appointment.should_handoff,
-                "appointment_payload": appointment.model_dump(),
+                "handoff_required": booking.should_handoff,
+                "booking_payload": booking.model_dump(),
             }
         except Exception as exc:
-            mark_error("3.c.1 appointment_node", exc)
+            mark_error("3.c.1 booking_node", exc)
             raise
 
     async def _finalize_turn(self, state: GraphState) -> GraphState:
@@ -316,22 +319,22 @@ class ClinicWorkflow:
     def _apply_state_update(self, state: GraphState, patch: dict[str, Any]) -> GraphState:
         merged: GraphState = deepcopy(state)
         for key, value in patch.items():
-            if key == "appointment_slots" and isinstance(value, dict):
+            if key == "booking_details" and isinstance(value, dict):
                 existing = merged.get(key, {})
-                merged[key] = _merge_slots(existing if isinstance(existing, dict) else {}, value)
+                merged[key] = _merge_booking_details(existing if isinstance(existing, dict) else {}, value)
             else:
                 merged[key] = value
         return merged
 
     def _cleanup_state(self, state: GraphState) -> GraphState:
         cleaned: GraphState = deepcopy(state)
-        if cleaned.get("next_node") != "appointment":
+        if cleaned.get("next_node") != "booking":
             cleaned["pending_action"] = ""
             cleaned["pending_question"] = ""
-            cleaned["appointment_slots"] = {}
-            if cleaned.get("stage") in {"collecting_slots", "ready_for_handoff"}:
+            cleaned["booking_details"] = {}
+            if cleaned.get("stage") in {"collecting_booking_details", "ready_for_handoff"}:
                 cleaned["stage"] = "open"
-            if cleaned.get("active_goal") == "appointment" and not cleaned.get("handoff_required", False):
+            if cleaned.get("active_goal") == "booking" and not cleaned.get("handoff_required", False):
                 cleaned["active_goal"] = "conversation"
         if cleaned.get("next_node") != "rag":
             cleaned["last_tool_result"] = ""
@@ -344,14 +347,14 @@ class ClinicWorkflow:
             return True
         if turn_count and turn_count % self._settings.summary_refresh_turn_threshold == 0:
             return True
-        if state.get("next_node") == "appointment" and state.get("stage") == "ready_for_handoff":
+        if state.get("next_node") == "booking" and state.get("stage") == "ready_for_handoff":
             return True
         return False
 
 
-def _merge_slots(existing: dict[str, Any], incoming: dict[str, Any]) -> dict[str, Any]:
+def _merge_booking_details(existing: dict[str, Any], incoming: dict[str, Any]) -> dict[str, Any]:
     merged = dict(existing)
-    for key in ("patient_name", "reason", "preferred_date", "preferred_time"):
+    for key in ("client_name", "service", "preferred_date", "preferred_time"):
         value = incoming.get(key)
         if value:
             merged[key] = value
@@ -366,8 +369,8 @@ def _merge_slots(existing: dict[str, Any], incoming: dict[str, Any]) -> dict[str
 
 def _build_pending_question(missing_fields: list[str]) -> str:
     field_names = {
-        "patient_name": "el nombre del paciente",
-        "reason": "el motivo o especialidad",
+        "client_name": "el nombre del cliente",
+        "service": "el servicio",
         "preferred_date": "la fecha preferida",
         "preferred_time": "la hora preferida",
     }

@@ -1,1 +1,1 @@
-"""Service layer for the clinica assistant."""
+"""Service layer for the barbershop assistant."""

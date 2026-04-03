@@ -1,0 +1,44 @@
+{
+  "barbershop_name": "Barberia Demo",
+  "timezone": "America/Mexico_City",
+  "services": [
+    {
+      "name": "Corte clasico",
+      "duration_minutes": 45,
+      "price": "250 MXN"
+    },
+    {
+      "name": "Corte y barba",
+      "duration_minutes": 60,
+      "price": "380 MXN"
+    },
+    {
+      "name": "Afeitado tradicional",
+      "duration_minutes": 30,
+      "price": "220 MXN"
+    }
+  ],
+  "barbers": [
+    {
+      "name": "Carlos Herrera",
+      "services": ["Corte clasico", "Corte y barba", "Fade"],
+      "availability_notes": "Lunes a viernes de 11:00 a 19:00"
+    },
+    {
+      "name": "Luis Mendoza",
+      "services": ["Afeitado tradicional", "Corte clasico"],
+      "availability_notes": "Martes a sabado de 10:00 a 18:00"
+    }
+  ],
+  "hours": {
+    "monday_to_friday": "10:00-20:00",
+    "saturday": "10:00-17:00",
+    "sunday": "Cerrado"
+  },
+  "policies": {
+    "appointments": "Las citas nuevas requieren nombre del cliente, servicio, y preferencia de fecha y hora.",
+    "payments": "Se aceptan tarjetas, transferencia y efectivo.",
+    "late_policy": "Hay tolerancia de 10 minutos; despues de eso la cita puede reprogramarse segun disponibilidad.",
+    "cancellations": "Las cancelaciones o cambios se agradecen con al menos 2 horas de anticipacion."
+  }
+}

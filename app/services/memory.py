@@ -1,62 +1,15 @@
 from __future__ import annotations
 
-import logging
-from collections.abc import Iterable, Mapping
-from itertools import islice
+from collections.abc import Sequence
+from datetime import UTC, datetime
 from typing import Any, Protocol
+from uuid import uuid4
+
+from langgraph.store.base import Embeddings
+from openai import AsyncOpenAI, OpenAI
 
 from app.models.schemas import MemoryRecord
 from app.settings import Settings
-
-logger = logging.getLogger(__name__)
-
-
-def _unwrap_mem0_results(results: Any) -> Any:
-    current = results
-    for _ in range(3):
-        if not isinstance(current, Mapping):
-            return current
-        for key in ("results", "memories", "items"):
-            if key in current:
-                current = current[key]
-                break
-        else:
-            return current
-    return current
-
-
-def _extract_memory_text(item: Any) -> str:
-    if isinstance(item, Mapping):
-        for key in ("memory", "text", "content"):
-            value = item.get(key)
-            if isinstance(value, str) and value:
-                return value
-        return ""
-    for attr in ("memory", "text", "content"):
-        value = getattr(item, attr, None)
-        if isinstance(value, str) and value:
-            return value
-    return ""
-
-
-def _normalize_mem0_search_results(results: Any, limit: int) -> list[str]:
-    raw_items = _unwrap_mem0_results(results)
-    if raw_items is None:
-        return []
-    if isinstance(raw_items, Mapping):
-        logger.warning("Mem0 search returned an unexpected mapping shape: keys=%s", sorted(raw_items.keys()))
-        return []
-    if isinstance(raw_items, (str, bytes)):
-        raw_items = [raw_items]
-    elif not isinstance(raw_items, Iterable):
-        raw_items = [raw_items]
-
-    memories: list[str] = []
-    for item in islice(raw_items, limit):
-        memory = _extract_memory_text(item)
-        if memory:
-            memories.append(memory)
-    return memories
 
 
 class MemoryStore(Protocol):
@@ -83,56 +36,86 @@ class InMemoryMemoryStore:
                 snippets.append(memory.text)
 
 
-class Mem0LocalMemoryStore:
-    def __init__(self) -> None:
-        from mem0 import Memory
-
-        self._client = Memory()
-
-    async def search(self, contact_id: str, query: str, limit: int = 5) -> list[str]:
-        results = self._client.search(query, filters={"user_id": contact_id}, limit=limit)
-        return _normalize_mem0_search_results(results, limit=limit)
-
-    async def save_memories(self, contact_id: str, memories: list[MemoryRecord]) -> None:
-        if not memories:
-            return
-        messages = [{"role": "system", "content": memory.text} for memory in memories]
-        self._client.add(messages, user_id=contact_id)
-
-
-class Mem0PlatformMemoryStore:
+class OpenAIEmbeddingsAdapter(Embeddings):
     def __init__(self, settings: Settings) -> None:
-        from mem0 import MemoryClient
+        client_kwargs: dict[str, Any] = {
+            "api_key": settings.openai_api_key or settings.resolved_llm_api_key or "sk-placeholder",
+        }
+        base_url = settings.openai_base_url or settings.resolved_llm_base_url
+        if base_url:
+            client_kwargs["base_url"] = base_url.rstrip("/")
+        self._sync_client = OpenAI(**client_kwargs)
+        self._async_client = AsyncOpenAI(**client_kwargs)
+        self._model = settings.memory_embedding_model
 
-        client_kwargs: dict[str, str] = {}
-        if settings.mem0_api_key:
-            client_kwargs["api_key"] = settings.mem0_api_key
-        if settings.mem0_org_id:
-            client_kwargs["org_id"] = settings.mem0_org_id
-        if settings.mem0_project_id:
-            client_kwargs["project_id"] = settings.mem0_project_id
-        self._client = MemoryClient(**client_kwargs)
+    def embed_documents(self, texts: list[str]) -> list[list[float]]:
+        if not texts:
+            return []
+        response = self._sync_client.embeddings.create(model=self._model, input=texts)
+        return [item.embedding for item in response.data]
+
+    def embed_query(self, text: str) -> list[float]:
+        response = self._sync_client.embeddings.create(model=self._model, input=text)
+        return response.data[0].embedding
+
+    async def aembed_documents(self, texts: list[str]) -> list[list[float]]:
+        if not texts:
+            return []
+        response = await self._async_client.embeddings.create(model=self._model, input=texts)
+        return [item.embedding for item in response.data]
+
+    async def aembed_query(self, text: str) -> list[float]:
+        response = await self._async_client.embeddings.create(model=self._model, input=text)
+        return response.data[0].embedding
+
+
+class PostgresMemoryStore:
+    def __init__(self, store: Any) -> None:
+        self._store = store
 
     async def search(self, contact_id: str, query: str, limit: int = 5) -> list[str]:
-        results = self._client.search(query, filters={"user_id": contact_id}, top_k=limit)
-        return _normalize_mem0_search_results(results, limit=limit)
+        items = await self._store.asearch(
+            ("memories", contact_id),
+            query=query,
+            limit=limit,
+        )
+        memories: list[str] = []
+        for item in items:
+            text = item.value.get("text")
+            if isinstance(text, str) and text:
+                memories.append(text)
+        return memories
 
     async def save_memories(self, contact_id: str, memories: list[MemoryRecord]) -> None:
-        if not memories:
-            return
-        messages = [{"role": "system", "content": memory.text} for memory in memories]
-        self._client.add(messages, user_id=contact_id)
+        namespace = ("memories", contact_id)
+        for memory in memories:
+            await self._store.aput(
+                namespace,
+                str(uuid4()),
+                {
+                    "text": memory.text,
+                    "kind": memory.kind,
+                    "source": memory.source,
+                    "created_at": datetime.now(UTC).isoformat(),
+                },
+                index=["text"],
+            )
 
 
-def build_memory_store(settings: Settings) -> MemoryStore:
-    try:
-        if settings.memory_backend == "mem0_local":
-            return Mem0LocalMemoryStore()
-        if settings.memory_backend == "mem0_platform":
-            return Mem0PlatformMemoryStore(settings)
-    except Exception as exc:  # pragma: no cover - depende de entorno externo
-        logger.warning("Falling back to in-memory store because mem0 failed to initialize: %s", exc)
+def build_memory_store(settings: Settings, store_backend: Any | None = None) -> MemoryStore:
+    if settings.memory_backend == "postgres":
+        if store_backend is None:
+            raise ValueError("Postgres memory backend requires a configured LangGraph store.")
+        return PostgresMemoryStore(store_backend)
     return InMemoryMemoryStore()
+
+
+def build_memory_index_config(settings: Settings) -> dict[str, Any]:
+    return {
+        "dims": settings.memory_embedding_dims,
+        "embed": OpenAIEmbeddingsAdapter(settings),
+        "fields": ["text"],
+    }
 
 
 def should_store_memory(user_message: str, assistant_message: str, route: str, state: dict[str, Any]) -> list[MemoryRecord]:
@@ -140,25 +123,25 @@ def should_store_memory(user_message: str, assistant_message: str, route: str, s
     lowered_assistant = assistant_message.lower().strip()
     memories: list[MemoryRecord] = []
 
-    if route == "appointment":
-        slots = state.get("appointment_slots") or {}
+    if route == "booking":
+        details = state.get("booking_details") or {}
         relevant_bits = []
-        for key in ("patient_name", "reason", "preferred_date", "preferred_time"):
-            value = slots.get(key)
+        for key in ("client_name", "service", "preferred_date", "preferred_time"):
+            value = details.get(key)
             if value:
                 relevant_bits.append(f"{key}={value}")
         if relevant_bits:
             memories.append(
                 MemoryRecord(
                     kind="profile",
-                    text="Preferencias de cita: " + ", ".join(relevant_bits),
+                    text="Preferencias de cita en barberia: " + ", ".join(relevant_bits),
                 )
             )
         elif lowered_user and not _is_trivial_turn(lowered_user):
             memories.append(
                 MemoryRecord(
                     kind="episode",
-                    text=f"El usuario solicito apoyo para agendar una cita: {user_message}",
+                    text=f"El usuario solicito apoyo para agendar una cita en barberia: {user_message}",
                 )
             )
         return memories
@@ -211,13 +194,16 @@ def _is_trivial_turn(user_message: str) -> bool:
 
 
 def _looks_like_persistent_preference(user_message: str) -> bool:
-    preference_markers = (
+    preference_markers: Sequence[str] = (
         "prefiero",
         "me gusta",
         "solo por",
         "no puedo",
         "no puedo por",
         "por favor escribeme",
-        "mejor por",
+        "escribeme por",
+        "contactame por",
+        "mi horario ideal",
+        "normalmente puedo",
     )
     return any(marker in user_message for marker in preference_markers)
