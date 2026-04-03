@@ -87,3 +87,18 @@ def test_create_app_requires_postgres_dsn_when_postgres_backends_are_enabled(mon
             pass
 
     get_settings.cache_clear()
+
+
+def test_create_app_requires_postgres_dsn_when_tracer_enabled(monkeypatch):
+    get_settings.cache_clear()
+    monkeypatch.setenv("LLM_API_KEY", "")
+    monkeypatch.setenv("MEMORY_BACKEND", "in_memory")
+    monkeypatch.setenv("CHECKPOINT_BACKEND", "memory")
+    monkeypatch.setenv("TRACER_ENABLED", "true")
+    monkeypatch.setenv("POSTGRES_DSN", "")
+
+    with pytest.raises(ValueError, match="POSTGRES_DSN"):
+        with TestClient(create_app()):
+            pass
+
+    get_settings.cache_clear()

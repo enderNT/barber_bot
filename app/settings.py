@@ -55,6 +55,12 @@ class Settings(BaseSettings):
     chatwoot_api_token: str | None = None
     chatwoot_account_id: str | None = None
 
+    tracer_enabled: bool = False
+    tracer_app_key: str = "barbershop-assistant"
+    tracer_batch_size: int = 25
+    tracer_flush_interval_seconds: float = 2.0
+    tracer_projectors_enabled: bool = True
+
     @property
     def resolved_llm_provider(self) -> str:
         return self.llm_provider.strip().lower()

@@ -169,3 +169,13 @@ class ChatwootWebhook(BaseModel):
             if content:
                 return str(content).strip()
         return ""
+
+    @property
+    def dedupe_key(self) -> str | None:
+        raw = (
+            self.additional_attributes.get("message_id")
+            or self.additional_attributes.get("source_id")
+            or self.meta.get("message", {}).get("id")
+            or next((message.get("id") for message in reversed(self.messages) if message.get("id")), None)
+        )
+        return str(raw) if raw is not None else None

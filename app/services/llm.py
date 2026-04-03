@@ -10,6 +10,7 @@ from openai import AsyncOpenAI
 from app.models.schemas import BookingIntentPayload, RoutingPacket, StateRoutingDecision
 from app.observability.flow_logger import mark_error, step, substep
 from app.settings import Settings
+from app.tracing import capture_trace_fragment
 
 logger = logging.getLogger(__name__)
 
@@ -85,9 +86,32 @@ class OpenAICompatibleProvider:
                 **self._chat_request_kwargs(messages=messages, temperature=temperature),
             )
             content = (response.choices[0].message.content or "").strip()
+            capture_trace_fragment(
+                "llm_call",
+                {
+                    "provider": self.provider_name,
+                    "model": self.model_name,
+                    "operation": "chat_text",
+                    "message_count": len(messages),
+                    "response_chars": len(content),
+                    "json_mode": False,
+                },
+                label="llm_chat_completion",
+                token_usage=_usage_to_dict(getattr(response, "usage", None)),
+            )
             step("2.2.1 llm_chat_completion", "OK", f"response_chars={len(content)}")
             return content
         except Exception as exc:
+            capture_trace_fragment(
+                "llm_error",
+                {
+                    "provider": self.provider_name,
+                    "model": self.model_name,
+                    "operation": "chat_text",
+                    "error_type": type(exc).__name__,
+                },
+                label="llm_chat_completion",
+            )
             mark_error("2.2.1 llm_chat_completion", exc)
             raise
 
@@ -102,6 +126,19 @@ class OpenAICompatibleProvider:
         try:
             response = await self._client.chat.completions.create(**request_kwargs)
             content = (response.choices[0].message.content or "").strip()
+            capture_trace_fragment(
+                "llm_call",
+                {
+                    "provider": self.provider_name,
+                    "model": self.model_name,
+                    "operation": "chat_json",
+                    "message_count": len(messages),
+                    "response_chars": len(content),
+                    "json_mode": True,
+                },
+                label="llm_chat_completion",
+                token_usage=_usage_to_dict(getattr(response, "usage", None)),
+            )
             step("2.2.1 llm_chat_completion", "OK", f"response_chars={len(content)}")
             return _extract_json(content)
         except Exception as exc:
@@ -111,8 +148,32 @@ class OpenAICompatibleProvider:
                     **self._json_schema_request_kwargs(messages=messages, temperature=temperature),
                 )
                 content = (response.choices[0].message.content or "").strip()
+                capture_trace_fragment(
+                    "llm_call",
+                    {
+                        "provider": self.provider_name,
+                        "model": self.model_name,
+                        "operation": "chat_json",
+                        "message_count": len(messages),
+                        "response_chars": len(content),
+                        "json_mode": True,
+                        "fallback": "json_schema",
+                    },
+                    label="llm_chat_completion",
+                    token_usage=_usage_to_dict(getattr(response, "usage", None)),
+                )
                 step("2.2.1 llm_chat_completion", "OK", f"response_chars={len(content)}")
                 return _extract_json(content)
+            capture_trace_fragment(
+                "llm_error",
+                {
+                    "provider": self.provider_name,
+                    "model": self.model_name,
+                    "operation": "chat_json",
+                    "error_type": type(exc).__name__,
+                },
+                label="llm_chat_completion",
+            )
             mark_error("2.2.1 llm_chat_completion", exc)
             raise
 
@@ -476,3 +537,13 @@ def _extract_json(content: str) -> dict[str, Any]:
 def _should_retry_with_json_schema(exc: Exception) -> bool:
     message = str(exc).lower()
     return "response_format.type" in message and "json_schema" in message
+
+
+def _usage_to_dict(usage: Any) -> dict[str, Any]:
+    if usage is None:
+        return {}
+    if hasattr(usage, "model_dump"):
+        return usage.model_dump()
+    if isinstance(usage, dict):
+        return usage
+    return {}

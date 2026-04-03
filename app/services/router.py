@@ -8,6 +8,7 @@ from app.models.schemas import RoutingPacket, StateRoutingDecision
 from app.observability.flow_logger import substep
 from app.services.llm import BarbershopLLMService
 from app.settings import Settings
+from app.tracing import capture_trace_fragment
 
 logger = logging.getLogger(__name__)
 
@@ -48,11 +49,27 @@ class StateRoutingService:
         guard_hint = self._deterministic_guard(routing_packet)
         if guard_hint is not None:
             substep("state_router_guard", "OK", guard_hint.reason)
+            capture_trace_fragment(
+                "router_guard",
+                {
+                    "decision": guard_hint.model_dump(),
+                    "reason": guard_hint.reason,
+                },
+                label="route_state",
+            )
             return guard_hint
 
         decision = await self._llm_service.classify_state_route(routing_packet)
         if decision.next_node == "rag" and not decision.needs_retrieval:
             decision.needs_retrieval = True
+        capture_trace_fragment(
+            "router_llm_decision",
+            {
+                "decision": decision.model_dump(),
+                "reason": decision.reason,
+            },
+            label="route_state",
+        )
         substep(
             "state_router_llm",
             "OK",

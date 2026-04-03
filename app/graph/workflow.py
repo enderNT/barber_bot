@@ -15,6 +15,9 @@ from app.services.memory import MemoryStore, should_store_memory
 from app.services.qdrant import QdrantRetrievalService
 from app.services.router import StateRoutingService
 from app.settings import Settings
+from app.tracing import NoopTraceSink, TraceContext, capture_trace_fragment
+from app.tracing.barbershop import BarbershopTraceNormalizer, build_barbershop_field_policy
+from app.tracing.types import TraceSink
 
 logger = logging.getLogger(__name__)
 
@@ -57,6 +60,8 @@ class BarbershopWorkflow:
         settings: Settings,
         checkpointer: Any | None = None,
         store_backend: Any | None = None,
+        trace_sink: TraceSink | None = None,
+        trace_normalizer: BarbershopTraceNormalizer | None = None,
     ) -> None:
         self._router_service = router_service
         self._llm_service = llm_service
@@ -66,6 +71,9 @@ class BarbershopWorkflow:
         self._settings = settings
         self._checkpointer = checkpointer or MemorySaver()
         self._store_backend = store_backend
+        self._trace_sink = trace_sink or NoopTraceSink()
+        self._trace_normalizer = trace_normalizer or BarbershopTraceNormalizer()
+        self._trace_field_policy = build_barbershop_field_policy()
         self._graph = self._build_graph()
 
     def _build_graph(self):
@@ -100,6 +108,17 @@ class BarbershopWorkflow:
         return graph.compile(**compile_kwargs)
 
     async def run(self, webhook: ChatwootWebhook) -> GraphState:
+        trace_context = TraceContext(
+            envelope=self._trace_normalizer.build_envelope(
+                webhook,
+                model_backend=self._settings.resolved_llm_provider,
+                model_name=self._settings.resolved_llm_model,
+                app_key=self._settings.tracer_app_key,
+            ),
+            sink=self._trace_sink,
+            normalizer=self._trace_normalizer,
+            field_policy=self._trace_field_policy,
+        ).start()
         initial_state: GraphState = {
             "conversation_id": webhook.conversation_id,
             "contact_id": webhook.contact_id,
@@ -107,7 +126,28 @@ class BarbershopWorkflow:
             "last_user_message": webhook.latest_message,
         }
         config = {"configurable": {"thread_id": webhook.conversation_id}}
-        return await self._graph.ainvoke(initial_state, config=config)
+        trace_context.capture_input(webhook)
+        try:
+            result = await self._graph.ainvoke(initial_state, config=config)
+            trace_context.capture_output(self._build_trace_output(result))
+            await trace_context.finalize(
+                "success",
+                metrics_payload={
+                    "fragment_count": len(result.get("booking_details", {})),
+                    "turn_count": result.get("turn_count", 0),
+                },
+                tags={"route": result.get("next_node", "conversation")},
+            )
+            return result
+        except Exception as exc:
+            trace_context.capture_error(exc)
+            await trace_context.finalize(
+                "error",
+                tags={"route": "error"},
+            )
+            raise
+        finally:
+            trace_context.detach()
 
     async def _load_context(self, state: GraphState) -> GraphState:
         try:
@@ -116,6 +156,14 @@ class BarbershopWorkflow:
                 state["contact_id"],
                 query=state.get("last_user_message") or state.get("conversation_summary") or "contexto del usuario",
                 limit=self._settings.memory_search_limit,
+            )
+            capture_trace_fragment(
+                "memory_lookup",
+                {
+                    "query": state.get("last_user_message") or state.get("conversation_summary") or "",
+                    "memories_found": len(memories),
+                },
+                label="load_context",
             )
             substep("mem0_lookup", "OK", f"memories={len(memories)}")
             step("2.1 build_context", "OK")
@@ -157,6 +205,19 @@ class BarbershopWorkflow:
                     or merged_state.get("active_goal") != state.get("active_goal"),
                 }
             )
+            capture_trace_fragment(
+                "routing_decision",
+                {
+                    "decision": {
+                        "next_node": decision.next_node,
+                        "intent": decision.intent,
+                        "confidence": decision.confidence,
+                        "needs_retrieval": decision.needs_retrieval,
+                    },
+                    "reason": decision.reason,
+                },
+                label="route",
+            )
             step(
                 "2.2 state_router",
                 "OK",
@@ -188,6 +249,11 @@ class BarbershopWorkflow:
                 user_message=state["last_user_message"],
                 memories=state.get("memories", []),
             )
+            capture_trace_fragment(
+                "node_result",
+                {"response_text": response_text, "next_node": "conversation"},
+                label="conversation",
+            )
             step("3.a.1 conversation_node", "OK", f"chars={len(response_text)}")
             return {
                 "response_text": response_text,
@@ -212,6 +278,14 @@ class BarbershopWorkflow:
                 memories=state.get("memories", []),
             )
             substep("qdrant_lookup", "OK", "contexto vectorial preparado")
+            capture_trace_fragment(
+                "rag_context",
+                {
+                    "query": state["last_user_message"],
+                    "barbershop_context_chars": len(rag_context),
+                },
+                label="rag",
+            )
             response_text = await self._llm_service.build_rag_reply(
                 user_message=state["last_user_message"],
                 memories=state.get("memories", []),
@@ -254,6 +328,14 @@ class BarbershopWorkflow:
                 "OK",
                 f"missing_fields={len(missing_fields)} handoff={booking.should_handoff}",
             )
+            capture_trace_fragment(
+                "booking_extraction",
+                {
+                    "booking_payload": booking.model_dump(),
+                    "missing_fields": missing_fields,
+                },
+                label="booking",
+            )
             step("3.c.1 booking_node", "OK", f"chars={len(response_text)}")
             return {
                 "response_text": response_text,
@@ -290,6 +372,15 @@ class BarbershopWorkflow:
                 cleaned_state["summary_refresh_requested"] = False
             cleaned_state["turn_count"] = int(cleaned_state.get("turn_count", 0))
             step("3.9 finalize_turn", "OK", "estado limpio")
+            capture_trace_fragment(
+                "state_finalized",
+                {
+                    "active_goal": cleaned_state.get("active_goal", ""),
+                    "stage": cleaned_state.get("stage", ""),
+                    "turn_count": cleaned_state.get("turn_count", 0),
+                },
+                label="finalize_turn",
+            )
             return cleaned_state
         except Exception as exc:
             mark_error("3.9 finalize_turn", exc)
@@ -306,6 +397,11 @@ class BarbershopWorkflow:
                 step("3.10 store_memory", "RUN", f"persistiendo {len(memories)} memorias utiles")
                 try:
                     await self._memory_store.save_memories(contact_id, memories)
+                    capture_trace_fragment(
+                        "memory_persisted",
+                        {"memories_found": len(memories)},
+                        label="store_memory",
+                    )
                     step("3.10 store_memory", "OK")
                 except Exception as exc:
                     mark_error("3.10 store_memory", exc)
@@ -350,6 +446,18 @@ class BarbershopWorkflow:
         if state.get("next_node") == "booking" and state.get("stage") == "ready_for_handoff":
             return True
         return False
+
+    def _build_trace_output(self, state: GraphState) -> dict[str, Any]:
+        return {
+            "response_text": state.get("response_text", ""),
+            "next_node": state.get("next_node", "conversation"),
+            "intent": state.get("intent", "conversation"),
+            "confidence": state.get("confidence", 0.0),
+            "needs_retrieval": state.get("needs_retrieval", False),
+            "handoff_required": state.get("handoff_required", False),
+            "booking_payload": state.get("booking_payload", {}),
+            "routing_reason": state.get("routing_reason", ""),
+        }
 
 
 def _merge_booking_details(existing: dict[str, Any], incoming: dict[str, Any]) -> dict[str, Any]:

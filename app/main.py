@@ -16,6 +16,13 @@ from app.services.memory import build_memory_index_config, build_memory_store
 from app.services.qdrant import QdrantRetrievalService
 from app.services.router import StateRoutingService
 from app.settings import Settings, get_settings
+from app.tracing import (
+    AsyncBatchTraceSink,
+    BarbershopTraceNormalizer,
+    BarbershopTraceProjector,
+    NoopTraceSink,
+    build_barbershop_field_policy,
+)
 from app.webhooks.routes import build_webhook_router
 
 
@@ -43,14 +50,26 @@ def _build_lifespan(settings: Settings):
     async def lifespan(app: FastAPI):
         async with AsyncExitStack() as stack:
             store_backend, checkpointer = await _build_persistence_resources(settings, stack)
-            app.state.agent_service = _build_agent_service(settings, store_backend, checkpointer)
+            trace_sink, trace_normalizer = await _build_trace_resources(settings, stack)
+            app.state.agent_service = _build_agent_service(
+                settings,
+                store_backend,
+                checkpointer,
+                trace_sink=trace_sink,
+                trace_normalizer=trace_normalizer,
+            )
             yield
 
     return lifespan
 
 
 def _build_agent_service(
-    settings: Settings, store_backend: Any | None, checkpointer: Any | None
+    settings: Settings,
+    store_backend: Any | None,
+    checkpointer: Any | None,
+    *,
+    trace_sink: Any | None = None,
+    trace_normalizer: Any | None = None,
 ) -> BarbershopAgentService:
     barbershop_config_loader = BarbershopConfigLoader(settings.barbershop_config_path)
     llm_provider = build_llm_provider(settings)
@@ -67,6 +86,8 @@ def _build_agent_service(
         settings,
         checkpointer=checkpointer,
         store_backend=store_backend,
+        trace_sink=trace_sink,
+        trace_normalizer=trace_normalizer,
     )
     return BarbershopAgentService(workflow, ChatwootClient(settings))
 
@@ -88,6 +109,33 @@ async def _build_persistence_resources(settings: Settings, stack: AsyncExitStack
         await checkpointer.setup()
 
     return store_backend, checkpointer
+
+
+async def _build_trace_resources(settings: Settings, stack: AsyncExitStack) -> tuple[Any, BarbershopTraceNormalizer]:
+    trace_normalizer = BarbershopTraceNormalizer()
+    if not settings.tracer_enabled:
+        return NoopTraceSink(), trace_normalizer
+
+    if not settings.postgres_dsn:
+        raise ValueError("POSTGRES_DSN is required when TRACER_ENABLED is true.")
+
+    from app.tracing.postgres import AsyncPostgresTraceRepository
+
+    field_policy = build_barbershop_field_policy()
+    projectors = [BarbershopTraceProjector()] if settings.tracer_projectors_enabled else []
+    repository = AsyncPostgresTraceRepository(
+        settings.postgres_dsn,
+        projectors=projectors,
+        field_policy=field_policy,
+    )
+    sink = AsyncBatchTraceSink(
+        repository,
+        batch_size=settings.tracer_batch_size,
+        flush_interval_seconds=settings.tracer_flush_interval_seconds,
+    )
+    await sink.start()
+    stack.push_async_callback(sink.close)
+    return sink, trace_normalizer
 
 
 async def _open_postgres_store(settings: Settings, stack: AsyncExitStack) -> Any:
