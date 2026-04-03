@@ -1,0 +1,17 @@
+.git
+.gitignore
+.env
+.env.*
+.venv
+.pytest_cache
+.vscode
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+*.log
+tests
+docs
+.deepeval
+PLAN.md
+*.egg-info
